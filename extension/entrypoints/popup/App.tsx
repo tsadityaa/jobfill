@@ -209,7 +209,7 @@ export default function App() {
           <DocumentsSection />
         )}
         {activeTab === 'agent' && (
-          <AgentChat />
+          <AgentChat profile={profile} />
         )}
       </div>
 

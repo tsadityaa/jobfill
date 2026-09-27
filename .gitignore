@@ -31,3 +31,4 @@ npm-debug.log*
 # Chrome extension dev
 *.crx
 *.pem
+.output/

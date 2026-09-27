@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { generateId } from '../types/profile';
 import CopyButton from './CopyButton';
 
@@ -40,8 +40,50 @@ export default function ArrayField<T extends ArrayItem>({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState<Partial<T>>({});
   const [isAdding, setIsAdding] = useState(false);
+  // Stable id assigned when "Add" mode opens — so auto-save can upsert the same item
+  const pendingIdRef = useRef<string | null>(null);
+
+  // Auto-save draft on every change (debounced 600ms)
+  useEffect(() => {
+    if (!isAdding && !editingId) return;
+    const timer = setTimeout(() => {
+      if (isAdding) {
+        // Assign a stable id on first auto-save
+        if (!pendingIdRef.current) {
+          pendingIdRef.current = generateId();
+        }
+        const newItem = {
+          ...draft,
+          id: pendingIdRef.current,
+          primary: items.length === 0 ? true : (draft.primary ?? false),
+        } as T;
+        // Upsert: replace if already auto-saved, otherwise append
+        const exists = items.some((i) => i.id === pendingIdRef.current);
+        let updated: T[];
+        if (exists) {
+          updated = items.map((i) => (i.id === pendingIdRef.current ? newItem : i));
+        } else {
+          updated = newItem.primary
+            ? [...items.map((i) => ({ ...i, primary: false })), newItem]
+            : [...items, newItem];
+        }
+        onChange(updated);
+      } else if (editingId) {
+        let updated = items.map((i) =>
+          i.id === editingId ? { ...i, ...draft } : i,
+        );
+        if (draft.primary) {
+          updated = updated.map((i) => ({ ...i, primary: i.id === editingId }));
+        }
+        onChange(updated);
+      }
+    }, 600);
+    return () => clearTimeout(timer);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draft]);
 
   const handleAdd = () => {
+    pendingIdRef.current = null;
     setDraft(createDefault() as Partial<T>);
     setIsAdding(true);
     setEditingId(null);
@@ -55,17 +97,19 @@ export default function ArrayField<T extends ArrayItem>({
 
   const handleSave = () => {
     if (isAdding) {
+      // Use the pending id if auto-save already created it, otherwise generate fresh
+      const id = pendingIdRef.current ?? generateId();
       const newItem = {
         ...draft,
-        id: generateId(),
+        id,
         primary: items.length === 0 ? true : (draft.primary ?? false),
       } as T;
-
-      // If setting as primary, unset others
+      const exists = items.some((i) => i.id === id);
       let updated: T[];
-      if (newItem.primary) {
-        updated = items.map((i) => ({ ...i, primary: false }));
-        updated.push(newItem);
+      if (exists) {
+        updated = items.map((i) => (i.id === id ? newItem : i));
+      } else if (newItem.primary) {
+        updated = [...items.map((i) => ({ ...i, primary: false })), newItem];
       } else {
         updated = [...items, newItem];
       }
@@ -74,21 +118,23 @@ export default function ArrayField<T extends ArrayItem>({
       let updated = items.map((i) =>
         i.id === editingId ? { ...i, ...draft } : i,
       );
-      // If setting as primary, unset others
       if (draft.primary) {
-        updated = updated.map((i) => ({
-          ...i,
-          primary: i.id === editingId,
-        }));
+        updated = updated.map((i) => ({ ...i, primary: i.id === editingId }));
       }
       onChange(updated);
     }
+    pendingIdRef.current = null;
     setIsAdding(false);
     setEditingId(null);
     setDraft({});
   };
 
   const handleCancel = () => {
+    // Remove the auto-saved draft item if it was added
+    if (isAdding && pendingIdRef.current) {
+      onChange(items.filter((i) => i.id !== pendingIdRef.current));
+    }
+    pendingIdRef.current = null;
     setIsAdding(false);
     setEditingId(null);
     setDraft({});
