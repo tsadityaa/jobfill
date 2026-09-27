@@ -1,0 +1,12 @@
+{
+  "name": "personal-copilot",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Personal Copilot — Secure personal application assistant Chrome Extension",
+  "workspaces": [
+    "extension"
+  ],
+  "allowScripts": {
+    "esbuild@0.28.2": true
+  }
+}

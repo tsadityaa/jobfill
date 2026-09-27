@@ -1,0 +1,43 @@
+{
+  "manifest_version": 3,
+  "name": "Personal Copilot",
+  "description": "Your secure personal application assistant. Store details, autofill forms, manage documents.",
+  "version": "0.1.0",
+  "icons": {
+    "16": "icon/icon.svg",
+    "32": "icon/icon.svg",
+    "48": "icon/icon.svg",
+    "128": "icon/icon.svg"
+  },
+  "permissions": [
+    "storage",
+    "unlimitedStorage",
+    "activeTab",
+    "scripting",
+    "webNavigation",
+    "tabs"
+  ],
+  "commands": {
+    "wxt:reload-extension": {
+      "description": "Reload the extension during development",
+      "suggested_key": {
+        "default": "Alt+R"
+      }
+    }
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Personal Copilot",
+    "default_popup": "popup.html"
+  },
+  "host_permissions": [
+    "<all_urls>",
+    "http://localhost/*"
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval' http://localhost:3000; object-src 'self';",
+    "sandbox": "script-src 'self' 'unsafe-inline' 'unsafe-eval' http://localhost:3000; sandbox allow-scripts allow-forms allow-popups allow-modals; child-src 'self';"
+  }
+}

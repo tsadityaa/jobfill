@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Test Job Application — Personal Copilot Testing</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --surface: #1e293b;
+      --border: #334155;
+      --text: #f1f5f9;
+      --muted: #94a3b8;
+      --accent: #8b5cf6;
+      --green: #22c55e;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      padding: 40px 20px;
+      line-height: 1.6;
+    }
+    .container {
+      max-width: 700px;
+      margin: 0 auto;
+    }
+    h1 {
+      font-size: 1.8rem;
+      margin-bottom: 8px;
+      color: var(--accent);
+    }
+    .subtitle {
+      color: var(--muted);
+      margin-bottom: 32px;
+      font-size: 0.9rem;
+    }
+    .test-badge {
+      display: inline-block;
+      padding: 4px 10px;
+      background: rgba(139, 92, 246, 0.15);
+      border: 1px solid rgba(139, 92, 246, 0.3);
+      border-radius: 4px;
+      font-size: 0.75rem;
+      color: var(--accent);
+      margin-bottom: 24px;
+    }
+    fieldset {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 20px;
+      margin-bottom: 24px;
+      background: var(--surface);
+    }
+    legend {
+      font-weight: 600;
+      font-size: 1rem;
+      padding: 0 8px;
+      color: var(--text);
+    }
+    .form-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+    .form-group {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      margin-bottom: 12px;
+    }
+    .form-group.full {
+      grid-column: 1 / -1;
+    }
+    label {
+      font-size: 0.82rem;
+      color: var(--muted);
+      font-weight: 500;
+    }
+    input, select, textarea {
+      padding: 10px 12px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      font-family: inherit;
+      font-size: 0.9rem;
+      outline: none;
+      transition: border-color 0.2s, outline 0.2s;
+    }
+    input:focus, select:focus, textarea:focus {
+      border-color: var(--accent);
+    }
+    textarea { resize: vertical; min-height: 80px; }
+    .sensitive-label {
+      color: #f59e0b;
+      font-weight: 600;
+    }
+    .sensitive-label::before {
+      content: '⚠ ';
+    }
+    .test-indicator {
+      font-size: 0.7rem;
+      padding: 2px 6px;
+      border-radius: 3px;
+      margin-left: 8px;
+      font-weight: 600;
+    }
+    .test-auto {
+      background: rgba(34, 197, 94, 0.15);
+      color: var(--green);
+    }
+    .test-sensitive {
+      background: rgba(245, 158, 11, 0.15);
+      color: #f59e0b;
+    }
+    .test-tricky {
+      background: rgba(59, 130, 246, 0.15);
+      color: #3b82f6;
+    }
+    .submit-btn {
+      padding: 12px 32px;
+      background: var(--accent);
+      color: white;
+      border: none;
+      border-radius: 6px;
+      font-size: 1rem;
+      cursor: pointer;
+      font-weight: 600;
+    }
+    .submit-btn:hover { opacity: 0.9; }
+    .section-note {
+      font-size: 0.75rem;
+      color: var(--muted);
+      margin-bottom: 16px;
+      padding: 8px 12px;
+      background: rgba(139, 92, 246, 0.06);
+      border-radius: 4px;
+      border-left: 3px solid var(--accent);
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="test-badge">🧪 Test Page for Personal Copilot Extension</div>
+    <h1>Software Engineer Application</h1>
+    <p class="subtitle">TechCorp India — Bengaluru, Karnataka</p>
+
+    <form id="job-application" onsubmit="event.preventDefault(); alert('Form submitted! (This is a test page)')">
+
+      <!-- ===== TEST 1: Standard field names ===== -->
+      <fieldset>
+        <legend>Personal Information <span class="test-indicator test-auto">Test 1: Standard Names</span></legend>
+        <div class="section-note">These fields use standard HTML names that should be auto-detected.</div>
+        <div class="form-row">
+          <div class="form-group">
+            <label for="firstName">First Name</label>
+            <input type="text" id="firstName" name="firstName" autocomplete="given-name" placeholder="Enter first name" />
+          </div>
+          <div class="form-group">
+            <label for="lastName">Last Name</label>
+            <input type="text" id="lastName" name="lastName" autocomplete="family-name" placeholder="Enter last name" />
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label for="email">Email Address</label>
+            <input type="email" id="email" name="email" autocomplete="email" placeholder="you@example.com" />
+          </div>
+          <div class="form-group">
+            <label for="phone">Phone Number</label>
+            <input type="tel" id="phone" name="phone" autocomplete="tel" placeholder="+91 XXXXX XXXXX" />
+          </div>
+        </div>
+      </fieldset>
+
+      <!-- ===== TEST 2: Alternate field names ===== -->
+      <fieldset>
+        <legend>Contact Details <span class="test-indicator test-tricky">Test 2: Alternate Names</span></legend>
+        <div class="section-note">These use non-standard but common alternative field names.</div>
+        <div class="form-row">
+          <div class="form-group">
+            <label for="given-name">Given Name</label>
+            <input type="text" id="given-name" name="given_name" placeholder="Your given name" />
+          </div>
+          <div class="form-group">
+            <label for="family-name">Family Name</label>
+            <input type="text" id="family-name" name="family_name" placeholder="Your family name" />
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label for="contact_number">Contact Number</label>
+            <input type="tel" id="contact_number" name="contact_number" placeholder="Mobile number" />
+          </div>
+          <div class="form-group">
+            <label for="email_address">Email Address</label>
+            <input type="email" id="email_address" name="email_address" placeholder="Contact email" />
+          </div>
+        </div>
+      </fieldset>
+
+      <!-- ===== TEST 3: Compound field ===== -->
+      <fieldset>
+        <legend>Legal Name <span class="test-indicator test-tricky">Test 3: Compound Field</span></legend>
+        <div class="section-note">This is a single "full name" field — should combine first + last.</div>
+        <div class="form-group full">
+          <label for="full_name">Applicant's Full Legal Name</label>
+          <input type="text" id="full_name" name="full_name" placeholder="Enter your complete legal name" />
+        </div>
+        <div class="form-group">
+          <label for="dob">Date of Birth</label>
+          <input type="date" id="dob" name="dob" />
+        </div>
+      </fieldset>
+
+      <!-- ===== Address ===== -->
+      <fieldset>
+        <legend>Address <span class="test-indicator test-auto">Standard Address</span></legend>
+        <div class="form-group">
+          <label for="address_line_1">Address Line 1</label>
+          <input type="text" id="address_line_1" name="address_line_1" autocomplete="address-line1" placeholder="Street address" />
+        </div>
+        <div class="form-group">
+          <label for="address_line_2">Address Line 2</label>
+          <input type="text" id="address_line_2" name="address_line_2" autocomplete="address-line2" placeholder="Apt, suite, etc." />
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label for="city">City</label>
+            <input type="text" id="city" name="city" autocomplete="address-level2" placeholder="City" />
+          </div>
+          <div class="form-group">
+            <label for="state">State</label>
+            <input type="text" id="state" name="state" autocomplete="address-level1" placeholder="State" />
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label for="pin_code">PIN Code</label>
+            <input type="text" id="pin_code" name="pin_code" autocomplete="postal-code" placeholder="560001" />
+          </div>
+          <div class="form-group">
+            <label for="country">Country</label>
+            <input type="text" id="country" name="country" autocomplete="country-name" placeholder="India" />
+          </div>
+        </div>
+      </fieldset>
+
+      <!-- ===== Education ===== -->
+      <fieldset>
+        <legend>Education <span class="test-indicator test-auto">Standard Education</span></legend>
+        <div class="form-group">
+          <label for="university">University / College</label>
+          <input type="text" id="university" name="university" placeholder="Institution name" />
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label for="degree">Degree</label>
+            <input type="text" id="degree" name="degree" placeholder="B.Tech, M.Sc, etc." />
+          </div>
+          <div class="form-group">
+            <label for="major">Major / Field of Study</label>
+            <input type="text" id="major" name="major" placeholder="Computer Science" />
+          </div>
+        </div>
+        <div class="form-group">
+          <label for="gpa">GPA / CGPA</label>
+          <input type="text" id="gpa" name="gpa" placeholder="8.5" />
+        </div>
+      </fieldset>
+
+      <!-- ===== Experience ===== -->
+      <fieldset>
+        <legend>Work Experience <span class="test-indicator test-auto">Standard Experience</span></legend>
+        <div class="form-group">
+          <label for="company">Current / Last Company</label>
+          <input type="text" id="company" name="company" placeholder="Company name" />
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label for="job_title">Job Title / Position</label>
+            <input type="text" id="job_title" name="job_title" placeholder="Software Engineer" />
+          </div>
+          <div class="form-group">
+            <label for="skills">Key Skills</label>
+            <input type="text" id="skills" name="skills" placeholder="React, TypeScript, etc." />
+          </div>
+        </div>
+      </fieldset>
+
+      <!-- ===== Professional Links ===== -->
+      <fieldset>
+        <legend>Professional Links <span class="test-indicator test-auto">Standard Links</span></legend>
+        <div class="form-row">
+          <div class="form-group">
+            <label for="linkedin">LinkedIn Profile</label>
+            <input type="url" id="linkedin" name="linkedin" placeholder="https://linkedin.com/in/..." />
+          </div>
+          <div class="form-group">
+            <label for="github">GitHub Profile</label>
+            <input type="url" id="github" name="github" placeholder="https://github.com/..." />
+          </div>
+        </div>
+        <div class="form-group">
+          <label for="portfolio">Portfolio / Website</label>
+          <input type="url" id="portfolio" name="portfolio" placeholder="https://yoursite.com" />
+        </div>
+      </fieldset>
+
+      <!-- ===== TEST 4: Sensitive fields — MUST NOT auto-fill ===== -->
+      <fieldset style="border-color: #f59e0b;">
+        <legend>Legal & Compliance <span class="test-indicator test-sensitive">Test 4: Sensitive — Must NOT Auto-fill</span></legend>
+        <div class="section-note" style="border-color: #f59e0b; background: rgba(245, 158, 11, 0.06);">
+          ⚠ These fields should be flagged as "USER_DECISION_REQUIRED" and NEVER auto-filled.
+        </div>
+        <div class="form-group">
+          <label for="work_auth" class="sensitive-label">Are you authorized to work in India?</label>
+          <select id="work_auth" name="work_authorization">
+            <option value="">Select...</option>
+            <option value="yes">Yes</option>
+            <option value="no">No</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="visa" class="sensitive-label">Do you require visa sponsorship?</label>
+          <select id="visa" name="visa_sponsorship">
+            <option value="">Select...</option>
+            <option value="yes">Yes</option>
+            <option value="no">No</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="criminal" class="sensitive-label">Do you have any criminal convictions?</label>
+          <select id="criminal" name="criminal_record">
+            <option value="">Select...</option>
+            <option value="yes">Yes</option>
+            <option value="no">No</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="disability" class="sensitive-label">Do you have any disability?</label>
+          <select id="disability" name="disability">
+            <option value="">Select...</option>
+            <option value="yes">Yes</option>
+            <option value="no">No</option>
+            <option value="prefer_not">Prefer not to say</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="salary_expectation" class="sensitive-label">Expected Salary / CTC (INR)</label>
+          <input type="text" id="salary_expectation" name="salary_expectation" placeholder="Enter expected CTC" />
+        </div>
+        <div class="form-group">
+          <label for="gender" class="sensitive-label">Gender</label>
+          <select id="gender" name="gender">
+            <option value="">Select...</option>
+            <option value="male">Male</option>
+            <option value="female">Female</option>
+            <option value="non_binary">Non-binary</option>
+            <option value="prefer_not">Prefer not to say</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="notice_period" class="sensitive-label">Notice Period (days)</label>
+          <input type="text" id="notice_period" name="notice_period" placeholder="30, 60, 90..." />
+        </div>
+      </fieldset>
+
+      <!-- ===== TEST 5: Document requirements ===== -->
+      <fieldset>
+        <legend>Documents <span class="test-indicator test-tricky">Test 5: Requirements Detection</span></legend>
+        <div class="section-note">Agent should detect these requirements in Phase 6.</div>
+        <div class="form-group">
+          <label>
+            Photograph<br />
+            <small style="color: var(--muted)">JPG format, 35×45mm, 20KB–100KB, white background</small>
+          </label>
+          <input type="file" accept="image/jpeg" />
+        </div>
+        <div class="form-group">
+          <label>
+            Resume / CV<br />
+            <small style="color: var(--muted)">PDF format, max 2MB</small>
+          </label>
+          <input type="file" accept=".pdf" />
+        </div>
+      </fieldset>
+
+      <!-- ===== Consent ===== -->
+      <fieldset style="border-color: #f59e0b;">
+        <legend>Declaration <span class="test-indicator test-sensitive">Sensitive — Consent</span></legend>
+        <div class="form-group">
+          <label style="display: flex; align-items: flex-start; gap: 8px; cursor: pointer;">
+            <input type="checkbox" name="consent" style="margin-top: 4px;" />
+            <span>I declare that the information provided is true and accurate. I agree to the Terms and Conditions and Privacy Policy.</span>
+          </label>
+        </div>
+      </fieldset>
+
+      <button type="submit" class="submit-btn">Submit Application</button>
+    </form>
+  </div>
+</body>
+</html>

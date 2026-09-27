@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+.wxt/
+dist/
+output/
+
+# Build
+*.tsbuildinfo
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+npm-debug.log*
+
+# Chrome extension dev
+*.crx
+*.pem
