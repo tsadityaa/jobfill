@@ -1651,3 +1651,387 @@ body {
   height: 100%;
   border: none;
 }
+
+/* ============================================================
+   PDF Processor Modal
+   ============================================================ */
+
+.pdf-proc-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.75);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 300;
+  padding: 8px;
+}
+
+.pdf-proc-modal {
+  background: var(--color-pc-bg);
+  border: 1px solid var(--color-pc-border);
+  border-radius: 14px;
+  width: 100%;
+  max-width: 400px;
+  max-height: 92vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(139, 92, 246, 0.1);
+}
+
+.pdf-proc-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px 10px;
+  border-bottom: 1px solid var(--color-pc-border);
+  flex-shrink: 0;
+  background: linear-gradient(135deg, rgba(139,92,246,0.08), rgba(6,182,212,0.04));
+}
+
+.pdf-proc-title {
+  font-size: 0.92rem;
+  font-weight: 700;
+  color: var(--color-pc-text);
+}
+
+.pdf-proc-subtitle {
+  font-size: 0.68rem;
+  color: var(--color-pc-text-muted);
+  margin-top: 1px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 280px;
+}
+
+/* Tab bar */
+.pdf-proc-tabs {
+  display: flex;
+  overflow-x: auto;
+  gap: 2px;
+  padding: 6px 8px 0;
+  background: var(--color-pc-surface-alt);
+  border-bottom: 1px solid var(--color-pc-border);
+  flex-shrink: 0;
+  scrollbar-width: none;
+}
+
+.pdf-proc-tabs::-webkit-scrollbar { display: none; }
+
+.pdf-proc-tab {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 6px 10px;
+  border: none;
+  background: transparent;
+  color: var(--color-pc-text-muted);
+  font-family: var(--font-sans);
+  font-size: 0.65rem;
+  font-weight: 500;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  border-radius: 6px 6px 0 0;
+  white-space: nowrap;
+  transition: color 0.2s, background 0.2s;
+  flex-shrink: 0;
+}
+
+.pdf-proc-tab:hover {
+  color: var(--color-pc-text);
+  background: rgba(139,92,246,0.06);
+}
+
+.pdf-proc-tab.active {
+  color: var(--color-pc-accent-start);
+  border-bottom-color: var(--color-pc-accent-start);
+  background: rgba(139,92,246,0.08);
+}
+
+.pdf-proc-tab-label { font-size: 0.6rem; }
+
+/* Status banner */
+.pdf-proc-status {
+  padding: 7px 14px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  flex-shrink: 0;
+  animation: fadeIn 0.2s ease-out;
+}
+
+.pdf-proc-status-success {
+  background: rgba(34,197,94,0.1);
+  color: var(--color-pc-success);
+  border-bottom: 1px solid rgba(34,197,94,0.2);
+}
+
+.pdf-proc-status-error {
+  background: rgba(239,68,68,0.1);
+  color: var(--color-pc-error);
+  border-bottom: 1px solid rgba(239,68,68,0.2);
+}
+
+.pdf-proc-status-info {
+  background: rgba(59,130,246,0.1);
+  color: var(--color-pc-info);
+  border-bottom: 1px solid rgba(59,130,246,0.2);
+}
+
+/* Body scroll area */
+.pdf-proc-body {
+  overflow-y: auto;
+  flex: 1;
+  padding: 12px 14px 16px;
+}
+
+/* Section within a tab */
+.pdf-proc-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.pdf-proc-subsection {
+  background: var(--color-pc-surface);
+  border: 1px solid var(--color-pc-border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.pdf-proc-sub-title {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--color-pc-text);
+}
+
+.pdf-proc-desc {
+  font-size: 0.75rem;
+  color: var(--color-pc-text-muted);
+  line-height: 1.5;
+}
+
+.pdf-proc-hint {
+  font-size: 0.68rem;
+  color: var(--color-pc-text-muted);
+  line-height: 1.4;
+}
+
+.pdf-proc-hint code {
+  background: var(--color-pc-surface-hover);
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 0.68rem;
+}
+
+.pdf-proc-warn {
+  font-size: 0.75rem;
+  color: var(--color-pc-warning);
+  padding: 6px 10px;
+  background: rgba(245,158,11,0.08);
+  border: 1px solid rgba(245,158,11,0.2);
+  border-radius: 6px;
+}
+
+.pdf-proc-orig-size {
+  font-size: 0.75rem;
+  color: var(--color-pc-text-secondary);
+}
+
+/* Option buttons (compress level etc.) */
+.pdf-proc-options {
+  display: flex;
+  gap: 6px;
+}
+
+.pdf-proc-option-btn {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 10px 6px;
+  background: var(--color-pc-surface);
+  border: 1px solid var(--color-pc-border);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  font-family: var(--font-sans);
+}
+
+.pdf-proc-option-btn:hover {
+  border-color: var(--color-pc-border-light);
+  background: var(--color-pc-surface-hover);
+}
+
+.pdf-proc-option-btn.active {
+  border-color: var(--color-pc-accent-start);
+  background: rgba(139,92,246,0.1);
+  box-shadow: 0 0 0 1px rgba(139,92,246,0.2);
+}
+
+.pdf-proc-option-btn.compact {
+  flex: none;
+  padding: 6px 12px;
+  flex-direction: row;
+}
+
+.pdf-proc-option-icon { font-size: 1rem; }
+.pdf-proc-option-label { font-size: 0.75rem; font-weight: 600; color: var(--color-pc-text); }
+.pdf-proc-option-desc { font-size: 0.62rem; color: var(--color-pc-text-muted); }
+
+/* Row */
+.pdf-proc-row {
+  display: flex;
+  gap: 6px;
+}
+
+/* Grid 2-col for action cards */
+.pdf-proc-grid2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.pdf-proc-action-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 14px 8px;
+  background: var(--color-pc-surface);
+  border: 1px solid var(--color-pc-border);
+  border-radius: 10px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  font-family: var(--font-sans);
+  text-align: center;
+}
+
+.pdf-proc-action-card:hover:not(:disabled) {
+  border-color: var(--color-pc-accent-start);
+  background: rgba(139,92,246,0.06);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 16px rgba(139,92,246,0.1);
+}
+
+.pdf-proc-action-card:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Info rows */
+.pdf-proc-info-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.75rem;
+  padding: 3px 0;
+  border-bottom: 1px solid var(--color-pc-border);
+  gap: 8px;
+}
+
+.pdf-proc-info-row:last-child { border-bottom: none; }
+
+.pdf-proc-info-row span:first-child {
+  color: var(--color-pc-text-muted);
+  flex-shrink: 0;
+}
+
+.pdf-proc-info-row span:last-child,
+.pdf-proc-info-row strong {
+  color: var(--color-pc-text);
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ============================================================
+   Result Preview Card (Preview-before-Download)
+   ============================================================ */
+
+.pdf-proc-result-card {
+  margin-top: 12px;
+  background: var(--color-pc-surface);
+  border: 1px solid var(--color-pc-accent-start);
+  border-radius: 10px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.pdf-proc-result-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.pdf-proc-result-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.pdf-proc-result-name {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--color-pc-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pdf-proc-result-meta {
+  font-size: 0.65rem;
+  color: var(--color-pc-text-muted);
+  margin-top: 1px;
+}
+
+.pdf-proc-result-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.pdf-proc-preview-content {
+  margin-top: 6px;
+  background: #f5f5f5;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--color-pc-border);
+}
+
+.pdf-proc-iframe {
+  width: 100%;
+  height: 200px;
+  border: none;
+}
+
+.pdf-proc-preview-img {
+  display: block;
+  max-width: 100%;
+  max-height: 240px;
+  object-fit: contain;
+  margin: 4px auto;
+  border-radius: 4px;
+}
+
+.pdf-proc-result-notice {
+  margin-top: 6px;
+  font-size: 0.72rem;
+  color: var(--color-pc-text-muted);
+  padding: 6px 8px;
+  background: var(--color-pc-surface-hover);
+  border-radius: 6px;
+  text-align: center;
+}
+

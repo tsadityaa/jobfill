@@ -116,16 +116,27 @@ export const SUPPORTED_IMAGE_TYPES = [
   'image/bmp',
 ];
 
+/** Word / Office MIME types */
+export const SUPPORTED_WORD_TYPES = [
+  'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+];
+
 /**
  * All supported document MIME types.
  */
 export const SUPPORTED_DOCUMENT_TYPES = [
   ...SUPPORTED_IMAGE_TYPES,
   'application/pdf',
+  ...SUPPORTED_WORD_TYPES,
 ];
 
 export function isImageType(mimeType: string): boolean {
   return SUPPORTED_IMAGE_TYPES.includes(mimeType);
+}
+
+export function isWordType(mimeType: string): boolean {
+  return SUPPORTED_WORD_TYPES.includes(mimeType);
 }
 
 export function formatFileSize(bytes: number): string {
@@ -136,7 +147,12 @@ export function formatFileSize(bytes: number): string {
 
 export function guessCategoryFromFile(file: File): DocumentCategory {
   const name = file.name.toLowerCase();
-  if (file.type === 'application/pdf' || name.includes('resume') || name.includes('cv')) {
+  if (
+    file.type === 'application/pdf' ||
+    isWordType(file.type) ||
+    name.includes('resume') ||
+    name.includes('cv')
+  ) {
     return 'resume';
   }
   if (name.includes('passport') || name.includes('license') || name.includes('id')) {

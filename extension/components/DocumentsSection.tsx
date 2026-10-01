@@ -19,6 +19,7 @@ import { generateId } from '../types/profile';
 import DocumentCard from './DocumentCard';
 import ImageEditor from './ImageEditor';
 import PdfViewer from './PdfViewer';
+import PdfProcessor from './PdfProcessor';
 
 const CATEGORIES: Array<'all' | DocumentCategory> = ['all', 'resume', 'photo', 'id', 'certificate', 'other'];
 
@@ -37,6 +38,9 @@ export default function DocumentsSection() {
   // PDF viewer state
   const [previewDoc, setPreviewDoc] = useState<StoredDocument | null>(null);
   const [previewBlob, setPreviewBlob] = useState<Blob | null>(null);
+
+  // PDF processor state
+  const [processorDoc, setProcessorDoc] = useState<StoredDocument | null>(null);
 
   // Load documents on mount
   useEffect(() => {
@@ -69,6 +73,7 @@ export default function DocumentsSection() {
         const id = generateId();
         const category = guessCategoryFromFile(file);
         const isImage = isImageType(file.type);
+        // Word files get a document icon thumbnail placeholder
 
         let width: number | undefined;
         let height: number | undefined;
@@ -222,7 +227,7 @@ export default function DocumentsSection() {
             : 'Drop files here or click to upload'}
         </div>
         <div className="docs-upload-hint">
-          Images (JPEG, PNG, WebP) & PDF
+          Images, PDF, Word (.doc, .docx)
         </div>
       </div>
 
@@ -258,6 +263,7 @@ export default function DocumentsSection() {
               onDownload={handleDownload}
               onEdit={handleEdit}
               onPreview={handlePreview}
+              onProcess={(d) => setProcessorDoc(d)}
               onDelete={handleDelete}
             />
           ))}
@@ -293,6 +299,14 @@ export default function DocumentsSection() {
             setPreviewDoc(null);
             setPreviewBlob(null);
           }}
+        />
+      )}
+
+      {/* PDF Processor Modal */}
+      {processorDoc && (
+        <PdfProcessor
+          doc={processorDoc}
+          onClose={() => setProcessorDoc(null)}
         />
       )}
     </div>

@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import AIBlobLoader from './AIBlobLoader';
 import type { UserProfile } from '../types/profile';
 import type { ScanResult, AutofillResult, FieldMapping } from '../types/autofill';
 import type { ScanFieldsResponse, FillFieldsResponse, AIScanFieldsResponse } from '../types/messages';
@@ -373,9 +374,7 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
       )}
 
       {state === 'ai_mapping' && (
-        <button className="btn btn-primary btn-full" disabled>
-          🧠 AI mapping unknown fields...
-        </button>
+        <AIBlobLoader />
       )}
 
       {state === 'scanned' && (
