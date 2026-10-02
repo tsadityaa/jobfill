@@ -431,8 +431,11 @@ export function scanPageFields(): DetectedField[] {
   const detected: DetectedField[] = [];
 
   for (const el of elements) {
-    // Skip invisible elements
-    if (el.offsetParent === null && el.getAttribute('type') !== 'hidden') continue;
+    // Skip truly invisible elements (display:none or visibility:hidden).
+    // Do NOT use offsetParent — it returns null for elements inside position:fixed
+    // containers (e.g. Adobe/Workday modals), falsely treating them as hidden.
+    const cs = getComputedStyle(el);
+    if (cs.display === 'none' || cs.visibility === 'hidden') continue;
 
     const attributes: DetectedField['attributes'] = {
       name: el.getAttribute('name') || undefined,

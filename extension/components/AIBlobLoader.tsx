@@ -38,7 +38,7 @@ export default function AIBlobLoader() {
       size: 0.6 + Math.random() * 1.8,
       speed: (0.004 + Math.random() * 0.008) * (Math.random() < 0.5 ? 1 : -1),
       opacity: 0.3 + Math.random() * 0.7,
-      hue: 200 + Math.random() * 60,   // cyan-to-violet range
+      hue: 175 + Math.random() * 50,   // cyan-to-green range
     }));
 
     // ---- Phase offsets per point ----
@@ -83,8 +83,8 @@ export default function AIBlobLoader() {
 
       // ---- Outer ambient glow ----
       const outerGlow = ctx.createRadialGradient(cx, cy, BASE_R * 0.2, cx, cy, BASE_R * 2.2);
-      outerGlow.addColorStop(0, 'rgba(100,60,255,0.08)');
-      outerGlow.addColorStop(0.5, 'rgba(0,180,255,0.04)');
+      outerGlow.addColorStop(0, 'rgba(0,212,255,0.08)');
+      outerGlow.addColorStop(0.5, 'rgba(0,255,135,0.04)');
       outerGlow.addColorStop(1, 'rgba(0,0,0,0)');
       ctx.fillStyle = outerGlow;
       ctx.fillRect(0, 0, W, H);
@@ -103,10 +103,10 @@ export default function AIBlobLoader() {
 
       // ---- Neon border glow — multiple passes ----
       const glowColors = [
-        { color: `hsla(${200 + Math.sin(t * 0.0005) * 40},100%,65%,0.9)`, width: 2.5 },
-        { color: `hsla(${240 + Math.sin(t * 0.0004) * 50},90%,70%,0.5)`, width: 6 },
-        { color: `hsla(${270 + Math.sin(t * 0.0003) * 30},100%,75%,0.2)`, width: 14 },
-        { color: `hsla(${200 + Math.sin(t * 0.0005) * 40},100%,65%,0.07)`, width: 28 },
+        { color: `hsla(${185 + Math.sin(t * 0.0005) * 20},100%,65%,0.9)`, width: 2.5 },
+        { color: `hsla(${155 + Math.sin(t * 0.0004) * 30},100%,70%,0.5)`, width: 6 },
+        { color: `hsla(${185 + Math.sin(t * 0.0003) * 20},100%,75%,0.2)`, width: 14 },
+        { color: `hsla(${185 + Math.sin(t * 0.0005) * 20},100%,65%,0.07)`, width: 28 },
       ];
       for (const g of glowColors) {
         ctx.save();
@@ -213,7 +213,7 @@ export default function AIBlobLoader() {
         fontWeight: 600,
         letterSpacing: '0.06em',
         textTransform: 'uppercase',
-        background: 'linear-gradient(90deg, #8b5cf6, #06b6d4, #8b5cf6)',
+        background: 'linear-gradient(90deg, #00d4ff, #00ff87, #00d4ff)',
         backgroundSize: '200% auto',
         WebkitBackgroundClip: 'text',
         WebkitTextFillColor: 'transparent',

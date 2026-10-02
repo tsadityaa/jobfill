@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import AIBlobLoader from './AIBlobLoader';
+import ScanLoader from './ScanLoader';
 import type { UserProfile } from '../types/profile';
 import type { ScanResult, AutofillResult, FieldMapping } from '../types/autofill';
 import type { ScanFieldsResponse, FillFieldsResponse, AIScanFieldsResponse } from '../types/messages';
@@ -367,15 +367,9 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
         </button>
       )}
 
-      {state === 'scanning' && (
-        <button className="btn btn-primary btn-full" disabled>
-          🔍 Scanning fields...
-        </button>
-      )}
+      {state === 'scanning' && <ScanLoader mode="scanning" />}
 
-      {state === 'ai_mapping' && (
-        <AIBlobLoader />
-      )}
+      {state === 'ai_mapping' && <ScanLoader mode="ai" />}
 
       {state === 'scanned' && (
         <div style={{ display: 'flex', gap: '8px' }}>
@@ -393,11 +387,7 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
         </div>
       )}
 
-      {state === 'filling' && (
-        <button className="btn btn-primary btn-full" disabled>
-          ⚡ Filling...
-        </button>
-      )}
+      {state === 'filling' && <ScanLoader mode="filling" />}
 
       {(state === 'filled' || state === 'error') && (
         <button
