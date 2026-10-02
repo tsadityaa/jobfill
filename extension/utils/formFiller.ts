@@ -6,6 +6,7 @@
 // ============================================================
 
 import type { FieldMapping, AutofillResult, AutofillFieldResult } from '../types/autofill';
+import { scanPageFields } from './fieldDetector';
 
 /**
  * Find the React fiber key on a DOM node (differs across React versions).
@@ -206,9 +207,9 @@ function checkBadge(el: HTMLElement) {
   const badge = document.createElement('div');
   badge.textContent = '✓';
   badge.style.cssText = `
-    position: fixed;
-    left: ${rect.right - 14}px;
-    top:  ${rect.top + rect.height / 2}px;
+    position: absolute;
+    left: ${rect.right - 14 + window.scrollX}px;
+    top:  ${rect.top + rect.height / 2 + window.scrollY}px;
     transform: translate(-50%,-50%);
     width: 22px;
     height: 22px;
@@ -238,9 +239,9 @@ function glowField(el: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElemen
   const rect = el.getBoundingClientRect();
   const glow = document.createElement('div');
   glow.style.cssText = `
-    position: fixed;
-    left: ${rect.left}px;
-    top:  ${rect.top}px;
+    position: absolute;
+    left: ${rect.left + window.scrollX}px;
+    top:  ${rect.top + window.scrollY}px;
     width: ${rect.width}px;
     height: ${rect.height}px;
     border-radius: ${getComputedStyle(el).borderRadius || '4px'};
@@ -372,13 +373,128 @@ export function fillFields(mappings: FieldMapping[]): AutofillResult {
 
   const filledCount = filled.length;
 
+  // ---- Phase 1.5: Re-scan after select/dropdown changes ----
+  // When selects (Country, State, Phone Type, etc.) are filled, the form may
+  // dynamically add/remove fields or swap dropdown options.
+  // Examples:
+  //   - Country → US to India: adds "Local Given Name", "Local Family Name"
+  //   - Country → India: State dropdown gets Indian states (Karnataka matches)
+  // Strategy: wait for React re-render, re-scan, fill newly-appeared fields.
+  const filledSelects = filled.filter(({ el }) => el instanceof HTMLSelectElement);
+
+  if (filledSelects.length > 0) {
+    // Build profileField → value lookup from ALL original mappings
+    // so we can resolve values for newly-discovered fields
+    const valueByProfile: Record<string, string> = {};
+    for (const mapping of mappings) {
+      if (mapping.profileField && mapping.value) {
+        valueByProfile[mapping.profileField] = mapping.value;
+      }
+    }
+
+    const originalSelectors = new Set(mappings.map((m) => m.selector));
+
+    setTimeout(() => {
+      const newFilled: FillItem[] = [];
+
+      // --- Pass A: Retry ORIGINAL selects that failed in Phase 1 ---
+      // Their options may have changed (e.g., State dropdown switched from
+      // US states to Indian states after Country changed to India).
+      for (const mapping of mappings) {
+        const el = document.querySelector(mapping.selector);
+        if (!el || !(el instanceof HTMLSelectElement)) continue;
+        // Skip if value already matches — it was filled successfully
+        const currentText = el.options[el.selectedIndex]?.textContent?.trim().toLowerCase() ?? '';
+        const targetLower = mapping.value.toLowerCase().trim();
+        if (currentText === targetLower || currentText.includes(targetLower) || targetLower.includes(currentText)) continue;
+        // Also skip if the raw select value already matches
+        if (el.value.toLowerCase().trim() === targetLower) continue;
+
+        // Re-try filling with the (potentially updated) options
+        try {
+          const ok = fillSelect(el, mapping.value);
+          if (ok) {
+            newFilled.push({ el, mapping });
+            console.log(`[Personal Copilot] Re-scan: retried select "${mapping.selector}" → "${mapping.value}" ✓`);
+          }
+        } catch (err) {
+          console.warn('[Personal Copilot] Re-scan retry failed:', mapping.selector, err);
+        }
+      }
+
+      // --- Pass B: Fill BRAND NEW fields that weren't in the original scan ---
+      const freshFields = scanPageFields();
+
+      for (const field of freshFields) {
+        // Skip fields already in the original mapping
+        if (originalSelectors.has(field.selector)) continue;
+        // Only fill regex-matched fields (SAFE_AUTO)
+        if (field.category !== 'SAFE_AUTO' || !field.profileField) continue;
+        // Resolve value from the profile lookup
+        const value = valueByProfile[field.profileField];
+        if (!value) continue;
+
+        const el = document.querySelector(field.selector);
+        if (!el) continue;
+        if (
+          !(el instanceof HTMLInputElement ||
+            el instanceof HTMLTextAreaElement ||
+            el instanceof HTMLSelectElement)
+        ) continue;
+
+        // Fill the new field
+        try {
+          let ok = false;
+          const newMapping: FieldMapping = {
+            selector: field.selector,
+            profileField: field.profileField,
+            value,
+            confidence: field.confidence,
+          };
+
+          if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+            setNativeValue(el, value);
+            dispatchInputEvents(el, true /* skipBlur */);
+            ok = true;
+          } else if (el instanceof HTMLSelectElement) {
+            ok = fillSelect(el, value);
+          }
+
+          if (ok) {
+            newFilled.push({ el, mapping: newMapping });
+            // Also add to the main filled array for Phase 4 reinforcement
+            filled.push({ el, mapping: newMapping });
+          }
+        } catch (err) {
+          console.warn('[Personal Copilot] Re-scan fill failed:', field.selector, err);
+        }
+      }
+
+      // Animate newly-filled fields — use rAF so browser completes
+      // layout after the fills before we measure positions
+      if (newFilled.length > 0) {
+        console.log(`[Personal Copilot] Re-scan after select changes: filled ${newFilled.length} new fields`);
+        newFilled.forEach(({ el }, idx) => {
+          setTimeout(() => {
+            requestAnimationFrame(() => {
+              glowField(el);
+              checkBadge(el as HTMLElement);
+              burstParticles(el as HTMLElement);
+            });
+          }, idx * ANIM_STAGGER);
+        });
+      }
+    }, 800);
+  }
+
   // ---- Phase 2 (async, visual only): Stagger animations at 60ms ----
   // Data is already in the DOM — this is pure eye candy.
-  // IMPORTANT: React may batch-reconcile and clear values between Phase 1 and
-  // these timeouts. Before animating each field, verify its value is intact and
-  // re-apply if React wiped it (common on dynamically-rendered fields like
-  // Adobe's "Local Given Name" / "Local Family Name").
+  // IMPORTANT: When selects (Country, etc.) were filled in Phase 1, React may
+  // re-render the form ~200ms later — adding/removing fields and shifting
+  // positions. We delay Phase 2 by 400ms in that case so getBoundingClientRect()
+  // measures FINAL positions, not pre-re-render ones.
   const ANIM_STAGGER = 60;
+  const PHASE2_DELAY = filledSelects.length > 0 ? 400 : 0;
 
   filled.forEach(({ el, mapping }, idx) => {
     setTimeout(() => {
@@ -387,10 +503,13 @@ export function fillFields(mappings: FieldMapping[]): AutofillResult {
         setNativeValue(el, mapping.value);
         dispatchInputEvents(el, true /* skipBlur */);
       }
-      glowField(el);
-      checkBadge(el as HTMLElement);
-      burstParticles(el as HTMLElement);
-    }, idx * ANIM_STAGGER);
+      // Wait for layout to settle before measuring positions
+      requestAnimationFrame(() => {
+        glowField(el);
+        checkBadge(el as HTMLElement);
+        burstParticles(el as HTMLElement);
+      });
+    }, PHASE2_DELAY + idx * ANIM_STAGGER);
   });
 
   // ---- Phase 3: Page sweep after last animation ----
@@ -399,7 +518,7 @@ export function fillFields(mappings: FieldMapping[]): AutofillResult {
   // onBlur validator runs before React has fully committed the value, it
   // overwrites the field with an empty string. The `input`+`change` events
   // fired in Phase 1 are sufficient to update React state. Blur is skipped.
-  const lastAnimEnd = filledCount > 0 ? (filledCount - 1) * ANIM_STAGGER + 80 : 0;
+  const lastAnimEnd = filledCount > 0 ? PHASE2_DELAY + (filledCount - 1) * ANIM_STAGGER + 80 : 0;
 
   setTimeout(() => {
     if (filledCount > 0) pageCompleteFlash();
@@ -409,7 +528,7 @@ export function fillFields(mappings: FieldMapping[]): AutofillResult {
   // One last pass after all animations + page flash have fired.
   // Catches any React re-render triggered by animation-phase events.
   // Uses increasing delays (500ms, 1200ms, 2500ms) to survive multi-pass
-  // React reconciliation cycles.
+  // React reconciliation cycles. Also covers fields added by Phase 1.5.
   const REINFORCE_DELAYS = [500, 1200, 2500];
   for (const delay of REINFORCE_DELAYS) {
     setTimeout(() => {
