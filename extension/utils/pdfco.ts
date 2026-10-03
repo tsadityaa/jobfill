@@ -161,7 +161,7 @@ export async function splitPdf(url: string, pages: string): Promise<string[]> {
 
 /** Rotate PDF pages */
 export async function rotatePdf(url: string, angle: 90 | 180 | 270, pages = '0-'): Promise<string> {
-  const data = await callApi('/pdf/rotate', { url, pages, angle });
+  const data = await callApi('/pdf/edit/rotate', { url, pages, angle });
   return String(data.url);
 }
 
@@ -190,9 +190,10 @@ export async function wordToPdf(url: string): Promise<string> {
 
 /** PDF → Word/DOCX */
 export async function pdfToWord(url: string): Promise<string> {
-  const data = await callApi('/pdf/convert/to/doc', { url });
+  const data = await callApi('/pdf/convert/to/docx', { url });
   return String(data.url);
 }
+
 
 /** PDF → JPG images per page */
 export async function pdfToImages(url: string, pages = '0-', resolution = 150): Promise<string[]> {

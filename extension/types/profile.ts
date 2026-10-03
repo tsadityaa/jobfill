@@ -60,6 +60,7 @@ export interface Address {
 export interface Education {
   id: string;
   institution: string;
+  registrationNo?: string;
   degree: string;
   field: string;
   startDate?: string;

@@ -10,16 +10,19 @@ import {
 } from '../types/document';
 import { generateThumbnail, getImageDimensions } from '../utils/documentProcessor';
 import {
-  saveDocument,
-  loadAllDocumentMetadata,
-  loadDocumentBlob,
-  deleteDocument,
-} from '../utils/documentStorage';
+  cloudSaveDocument as saveDocument,
+  cloudLoadAllDocumentMetadata as loadAllDocumentMetadata,
+  cloudLoadDocumentBlob as loadDocumentBlob,
+  cloudDeleteDocument as deleteDocument,
+} from '../utils/cloudStorage';
 import { generateId } from '../types/profile';
 import DocumentCard from './DocumentCard';
 import ImageEditor from './ImageEditor';
 import PdfViewer from './PdfViewer';
 import PdfProcessor from './PdfProcessor';
+import { getCurrentUser } from '../utils/supabase';
+import { addMemory } from '../utils/memory';
+import { uploadToPdfCo, pdfToText } from '../utils/pdfco';
 
 const CATEGORIES: Array<'all' | DocumentCategory> = ['all', 'resume', 'photo', 'id', 'certificate', 'other'];
 
@@ -32,15 +35,34 @@ export default function DocumentsSection() {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Image editor state
-  const [editorDoc, setEditorDoc] = useState<StoredDocument | null>(null);
+  const [editorDocId, setEditorDocId] = useState<string | null>(() => sessionStorage.getItem('pc_editorDocId'));
   const [editorBlob, setEditorBlob] = useState<Blob | null>(null);
 
   // PDF viewer state
-  const [previewDoc, setPreviewDoc] = useState<StoredDocument | null>(null);
+  const [previewDocId, setPreviewDocId] = useState<string | null>(() => sessionStorage.getItem('pc_previewDocId'));
   const [previewBlob, setPreviewBlob] = useState<Blob | null>(null);
 
   // PDF processor state
-  const [processorDoc, setProcessorDoc] = useState<StoredDocument | null>(null);
+  const [processorDocId, setProcessorDocId] = useState<string | null>(() => sessionStorage.getItem('pc_processorDocId'));
+
+  useEffect(() => {
+    if (editorDocId) sessionStorage.setItem('pc_editorDocId', editorDocId);
+    else sessionStorage.removeItem('pc_editorDocId');
+  }, [editorDocId]);
+
+  useEffect(() => {
+    if (previewDocId) sessionStorage.setItem('pc_previewDocId', previewDocId);
+    else sessionStorage.removeItem('pc_previewDocId');
+  }, [previewDocId]);
+
+  useEffect(() => {
+    if (processorDocId) sessionStorage.setItem('pc_processorDocId', processorDocId);
+    else sessionStorage.removeItem('pc_processorDocId');
+  }, [processorDocId]);
+
+  const editorDoc = documents.find(d => d.id === editorDocId) || null;
+  const previewDoc = documents.find(d => d.id === previewDocId) || null;
+  const processorDoc = documents.find(d => d.id === processorDocId) || null;
 
   // Load documents on mount
   useEffect(() => {
@@ -103,6 +125,27 @@ export default function DocumentsSection() {
 
         await saveDocument(metadata, file);
         setDocuments((prev) => [metadata, ...prev]);
+        
+        // --- Memory Engine: Ingest Resume ---
+        if (category === 'resume' && file.type === 'application/pdf') {
+          try {
+            const user = await getCurrentUser();
+            if (user) {
+              console.log('[Memory] Extracting resume text...');
+              const url = await uploadToPdfCo(file, file.name);
+              const text = await pdfToText(url);
+              
+              if (text && text.trim().length > 0) {
+                const contentToStore = `Document Category: ${category}\nFile Name: ${file.name}\n\nContent:\n${text}`;
+                await addMemory(user.id, contentToStore, { type: category, filename: file.name });
+                console.log('[Memory] Document successfully saved to memory graph.');
+              }
+            }
+          } catch (memErr) {
+            console.error('[Memory] Failed to extract/save resume memory:', memErr);
+          }
+        }
+        
       } catch (err) {
         console.error(`Failed to upload ${file.name}:`, err);
       }
@@ -152,7 +195,7 @@ export default function DocumentsSection() {
   const handleEdit = useCallback(async (doc: StoredDocument) => {
     try {
       const blob = await loadDocumentBlob(doc.id);
-      setEditorDoc(doc);
+      setEditorDocId(doc.id);
       setEditorBlob(blob);
     } catch (err) {
       console.error('Failed to load document for editing:', err);
@@ -163,7 +206,7 @@ export default function DocumentsSection() {
   const handlePreview = useCallback(async (doc: StoredDocument) => {
     try {
       const blob = await loadDocumentBlob(doc.id);
-      setPreviewDoc(doc);
+      setPreviewDocId(doc.id);
       setPreviewBlob(blob);
     } catch (err) {
       console.error('Failed to load document for preview:', err);
@@ -177,6 +220,43 @@ export default function DocumentsSection() {
       setDocuments((prev) => prev.filter((d) => d.id !== doc.id));
     } catch (err) {
       console.error('Delete failed:', err);
+    }
+  }, []);
+
+  // Upload document to current page's file input
+  const handleUploadToPage = useCallback(async (doc: StoredDocument) => {
+    try {
+      const blob = await loadDocumentBlob(doc.id);
+
+      // Convert blob to base64 data URL
+      const dataUrl: string = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result as string);
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(blob);
+      });
+
+      // Get the active tab and send the file data to the content script
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (!tab?.id) {
+        console.error('No active tab found');
+        return;
+      }
+
+      const response = await chrome.tabs.sendMessage(tab.id, {
+        type: 'INJECT_FILE',
+        fileName: doc.originalName,
+        mimeType: doc.mimeType,
+        dataUrl,
+      });
+
+      if (response?.success) {
+        console.log(`[Docs] File "${doc.originalName}" uploaded to page.`);
+      } else {
+        console.warn(`[Docs] File upload failed: ${response?.message}`);
+      }
+    } catch (err) {
+      console.error('Upload to page failed:', err);
     }
   }, []);
 
@@ -263,8 +343,9 @@ export default function DocumentsSection() {
               onDownload={handleDownload}
               onEdit={handleEdit}
               onPreview={handlePreview}
-              onProcess={(d) => setProcessorDoc(d)}
+              onProcess={(d) => setProcessorDocId(d.id)}
               onDelete={handleDelete}
+              onUploadToPage={handleUploadToPage}
             />
           ))}
         </div>
@@ -284,7 +365,7 @@ export default function DocumentsSection() {
           imageBlob={editorBlob}
           fileName={editorDoc.originalName}
           onClose={() => {
-            setEditorDoc(null);
+            setEditorDocId(null);
             setEditorBlob(null);
           }}
         />
@@ -296,7 +377,7 @@ export default function DocumentsSection() {
           pdfBlob={previewBlob}
           fileName={previewDoc.originalName}
           onClose={() => {
-            setPreviewDoc(null);
+            setPreviewDocId(null);
             setPreviewBlob(null);
           }}
         />
@@ -306,7 +387,7 @@ export default function DocumentsSection() {
       {processorDoc && (
         <PdfProcessor
           doc={processorDoc}
-          onClose={() => setProcessorDoc(null)}
+          onClose={() => setProcessorDocId(null)}
         />
       )}
     </div>

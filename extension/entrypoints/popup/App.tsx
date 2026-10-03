@@ -1,108 +1,111 @@
 import { useState, useEffect, useCallback } from 'react';
 import type { UserProfile } from '../../types/profile';
-import type { VaultState } from '../../types/vault';
 import { createEmptyProfile } from '../../types/profile';
-import {
-  getProfile,
-  saveProfile,
-  setupVault,
-} from '../../utils/storage';
-import {
-  getVaultState,
-  unlockVault,
-  lockVault,
-  hasLegacyData,
-  tryRestoreSession,
-  loadFromVault,
-} from '../../utils/vault';
+import { cloudGetProfile, cloudSaveProfile } from '../../utils/cloudStorage';
+import { supabase, getCurrentUser, signOut } from '../../utils/supabase';
 import Navigation from '../../components/Navigation';
 import ProfileSection from '../../components/ProfileSection';
 import AutofillButton from '../../components/AutofillButton';
 import AgentChat from '../../components/AgentChat';
-import VaultLock from '../../components/VaultLock';
 import DocumentsSection from '../../components/DocumentsSection';
+import LoginScreen from '../../components/LoginScreen';
+import type { User } from '@supabase/supabase-js';
+import { addMemory } from '../../utils/memory';
 
 type TabId = 'details' | 'documents' | 'agent';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<TabId>('details');
+  const [authChecked, setAuthChecked] = useState(false);
+  const [user, setUser] = useState<User | null>(null);
+
+  const [activeTab, setActiveTab] = useState<TabId>(() => {
+    return (sessionStorage.getItem('pc_activeTab') as TabId) || 'details';
+  });
+
+  useEffect(() => {
+    sessionStorage.setItem('pc_activeTab', activeTab);
+  }, [activeTab]);
+
   const [profile, setProfile] = useState<UserProfile>(createEmptyProfile());
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [vaultState, setVaultState] = useState<VaultState>('uninitialized');
-  const [hasMigration, setHasMigration] = useState(false);
 
-  // Check vault state on mount
+  // Check auth state on mount
   useEffect(() => {
-    async function init() {
-      const state = await getVaultState();
-
-      if (state === 'uninitialized') {
-        // Check if there's legacy data to migrate
-        const legacy = await hasLegacyData();
-        setHasMigration(legacy);
-        setVaultState('uninitialized');
-        setLoading(false);
-        return;
+    async function checkAuth() {
+      try {
+        const currentUser = await getCurrentUser();
+        setUser(currentUser);
+      } catch {
+        setUser(null);
       }
+      setAuthChecked(true);
+    }
+    checkAuth();
 
-      if (state === 'unlocked') {
-        // Already unlocked (cached key from this session in-memory)
-        const p = await getProfile();
+    // Listen for auth state changes
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null);
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  // Load profile when user logs in
+  useEffect(() => {
+    if (!user) {
+      setLoading(false);
+      return;
+    }
+
+    async function loadProfile() {
+      setLoading(true);
+      try {
+        const p = await cloudGetProfile();
         setProfile(p);
-        setVaultState('unlocked');
-        setLoading(false);
-        return;
+      } catch (err) {
+        console.error('Failed to load profile:', err);
+        setProfile(createEmptyProfile());
       }
-
-      // State is 'locked' — try session restoration first
-      const restoredKey = await tryRestoreSession();
-      if (restoredKey) {
-        // Session key was valid — vault is now unlocked
-        try {
-          const p = await loadFromVault();
-          setProfile(p);
-          setVaultState('unlocked');
-          setLoading(false);
-          return;
-        } catch {
-          // Key was stale or invalid — fall through to locked
-        }
-      }
-
-      setVaultState('locked');
       setLoading(false);
     }
-    init();
+    loadProfile();
+  }, [user]);
+
+  // Handle login callback
+  const handleLogin = useCallback(async () => {
+    const currentUser = await getCurrentUser();
+    setUser(currentUser);
   }, []);
 
-  // Handle vault setup (first time)
-  const handleSetup = useCallback(async (password: string) => {
-    const p = await setupVault(password);
-    setProfile(p);
-    setVaultState('unlocked');
-  }, []);
-
-  // Handle vault unlock
-  const handleUnlock = useCallback(async (password: string) => {
-    const p = await unlockVault(password);
-    setProfile(p);
-    setVaultState('unlocked');
-  }, []);
-
-  // Handle vault lock (now async due to session cleanup)
-  const handleLock = useCallback(async () => {
-    await lockVault();
+  // Handle sign out
+  const handleSignOut = useCallback(async () => {
+    await signOut();
+    setUser(null);
     setProfile(createEmptyProfile());
-    setVaultState('locked');
   }, []);
 
-  // Save profile (debounced via explicit save)
+  // Save profile to cloud
   const handleSaveProfile = useCallback(async (updated: UserProfile) => {
     setProfile(updated);
     setSaving(true);
     try {
-      await saveProfile(updated);
+      await cloudSaveProfile(updated);
+      
+      // Update memory with core profile facts
+      if (user) {
+        const memoryString = `My core profile facts:
+Name: ${updated.personal.firstName} ${updated.personal.lastName}
+Email: ${updated.emails.find(e => e.primary)?.value || updated.emails[0]?.value || 'None'}
+Phone: ${updated.phones.find(p => p.primary)?.value || updated.phones[0]?.value || 'None'}
+LinkedIn: ${updated.professional.linkedin || 'None'}
+Skills: ${updated.professional.skills.join(', ') || 'None'}
+Education: ${updated.education.map(e => `${e.degree} in ${e.field} from ${e.institution}`).join('; ')}
+Experience: ${updated.experience.map(e => `${e.title} at ${e.company}`).join('; ')}`;
+
+        addMemory(user.id, memoryString, { type: 'profile_summary' }).catch(console.error);
+      }
+      
     } catch (err) {
       console.error('Failed to save profile:', err);
     } finally {
@@ -110,7 +113,37 @@ export default function App() {
     }
   }, []);
 
-  // ---- Loading State ----
+  // ---- Auth Check Loading ----
+
+  if (!authChecked) {
+    return (
+      <div className="loading-screen animate-fade-in">
+        <div className="shimmer-container">
+          <div className="shimmer-header">
+            <div className="shimmer-circle" />
+            <div className="shimmer-lines">
+              <div className="shimmer-line shimmer-line-long" />
+              <div className="shimmer-line shimmer-line-short" />
+            </div>
+          </div>
+          <div className="shimmer-card" />
+          <div className="shimmer-card shimmer-card-short" />
+        </div>
+        <div className="loading-label">
+          <span className="loading-dot-pulse" />
+          Checking session…
+        </div>
+      </div>
+    );
+  }
+
+  // ---- Login Screen ----
+
+  if (!user) {
+    return <LoginScreen onLogin={handleLogin} />;
+  }
+
+  // ---- Loading Profile ----
 
   if (loading) {
     return (
@@ -129,54 +162,24 @@ export default function App() {
         </div>
         <div className="loading-label">
           <span className="loading-dot-pulse" />
-          Decrypting your vault…
+          Loading your profile…
         </div>
       </div>
     );
   }
 
-  // ---- Vault Lock / Setup Screen ----
-
-  if (vaultState !== 'unlocked') {
-    return (
-      <div style={{ display: 'flex', flexDirection: 'column', minHeight: '500px' }}>
-        {/* Header */}
-        <header className="header">
-          <div className="header-title">
-            <span className="icon">🧠</span>
-            <span className="gradient-text">Personal Copilot</span>
-          </div>
-        </header>
-
-        <VaultLock
-          vaultState={vaultState}
-          onUnlock={handleUnlock}
-          onSetup={handleSetup}
-        />
-
-        {hasMigration && vaultState === 'uninitialized' && (
-          <div style={{
-            padding: '8px 20px',
-            fontSize: '0.72rem',
-            color: 'var(--color-pc-info)',
-            textAlign: 'center',
-          }}>
-            ℹ Your existing profile data will be encrypted and migrated automatically.
-          </div>
-        )}
-      </div>
-    );
-  }
-
-  // ---- Main App (Vault Unlocked) ----
+  // ---- Main App ----
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', minHeight: '500px' }}>
       {/* Header */}
       <header className="header">
-        <div className="header-title">
-          <span className="icon">🧠</span>
-          <span className="gradient-text">Personal Copilot</span>
+        <div className="header-title" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M12 3L2 8L12 13L22 8L12 3Z" fill="#00e5ff"/>
+            <path d="M2.5 13L12 17.5L21.5 13M2.5 17L12 21.5L21.5 17" stroke="#ff9800" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"/>
+          </svg>
+          <span className="gradient-text" style={{ fontSize: '1.25rem', letterSpacing: '-0.02em' }}>JobFill</span>
           {saving ? (
             <span className="save-indicator animate-fade-in">
               <svg width="14" height="14" viewBox="0 0 14 14" fill="none" className="save-check-icon">
@@ -188,13 +191,23 @@ export default function App() {
           ) : (
             <button
               className="btn-lock"
-              onClick={handleLock}
-              title="Lock vault"
+              onClick={handleSignOut}
+              title="Sign out"
             >
-              🔒 Lock
+              🚪 Sign Out
             </button>
           )}
         </div>
+        {user.email && (
+          <div style={{
+            fontSize: '0.65rem',
+            color: 'var(--color-pc-text-muted)',
+            padding: '0 20px 4px',
+            fontFamily: 'var(--font-sans)',
+          }}>
+            {user.email}
+          </div>
+        )}
       </header>
 
       {/* Navigation */}

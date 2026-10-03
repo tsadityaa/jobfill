@@ -22,7 +22,7 @@ import {
   getExtraKeys,
   removeExtraKey,
 } from '../utils/pdfco';
-import { loadDocumentBlob, loadAllDocumentMetadata } from '../utils/documentStorage';
+import { cloudLoadDocumentBlob as loadDocumentBlob, cloudLoadAllDocumentMetadata as loadAllDocumentMetadata } from '../utils/cloudStorage';
 
 interface PdfProcessorProps {
   doc: StoredDocument;
@@ -239,6 +239,8 @@ function ResultPreview({ result, setResult }: { result: PreviewResult; setResult
   const isImage = result.mimeType === 'image/jpeg';
   const canPreview = isPdf || isImage;
 
+  const [inlinePreview, setInlinePreview] = useState(false);
+
   const previewUrls = useMemo(
     () => result.blobs.map((b) => URL.createObjectURL(b)),
     [result.blobs],
@@ -247,7 +249,7 @@ function ResultPreview({ result, setResult }: { result: PreviewResult; setResult
   useEffect(() => () => previewUrls.forEach((url) => URL.revokeObjectURL(url)), [previewUrls]);
 
   const togglePreview = () => {
-    setResult({ ...result, previewOpened: !result.previewOpened });
+    setInlinePreview(!inlinePreview);
   };
 
   const close = () => setResult(null);
@@ -259,8 +261,9 @@ function ResultPreview({ result, setResult }: { result: PreviewResult; setResult
   };
 
   return (
-    <div className="pdf-proc-result-card">
-      <div className="pdf-proc-result-header">
+    <>
+      <div className="pdf-proc-result-card">
+        <div className="pdf-proc-result-header">
         <div className="pdf-proc-result-info">
           <div className="pdf-proc-result-name">{result.filenames[0]}</div>
           <div className="pdf-proc-result-meta">
@@ -271,31 +274,32 @@ function ResultPreview({ result, setResult }: { result: PreviewResult; setResult
         <div className="pdf-proc-result-actions">
           {canPreview && (
             <button className="btn btn-secondary btn-sm" onClick={togglePreview}>
-              {result.previewOpened ? '👐 Hide' : '👁 View'}
+              {inlinePreview ? 'Hide Preview' : '👁️ Preview'}
             </button>
           )}
           <button className="btn btn-primary btn-sm" onClick={downloadAll}>⬇ Download</button>
           <button className="btn btn-ghost btn-sm" onClick={close}>✕</button>
         </div>
       </div>
-
-      {result.previewOpened && canPreview && (
-        <div className="pdf-proc-preview-content">
-          {isPdf && previewUrls.map((url, i) => (
-            <iframe key={i} src={`${url}#toolbar=0`} className="pdf-proc-iframe" title={result.filenames[i]} />
-          ))}
-          {isImage && previewUrls.map((url, i) => (
-            <img key={i} src={url} className="pdf-proc-preview-img" alt={result.filenames[i]} />
+      {inlinePreview && (
+        <div style={{ marginTop: 12, height: 350, display: 'flex', flexDirection: 'column', gap: 8, overflowY: 'auto', borderRadius: 6 }}>
+          {previewUrls.map((url, i) => (
+             isImage ? (
+               <img key={i} src={url} alt={result.filenames[i]} style={{ width: '100%', objectFit: 'contain', background: '#fff' }} />
+             ) : (
+               <iframe key={i} src={`${url}#toolbar=0`} width="100%" height="350px" style={{ border: 'none', background: '#fff', flexShrink: 0 }} title={result.filenames[i]} />
+             )
           ))}
         </div>
       )}
+    </div>
 
       {!canPreview && (
         <div className="pdf-proc-result-notice">
           Inline preview not available for this file type. Click Download to save.
         </div>
       )}
-    </div>
+    </>
   );
 }
 

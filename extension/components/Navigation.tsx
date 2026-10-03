@@ -6,9 +6,24 @@ interface NavigationProps {
 }
 
 const tabs = [
-  { id: 'details' as const, icon: '👤', label: 'My Details' },
-  { id: 'documents' as const, icon: '📄', label: 'Docs' },
-  { id: 'agent' as const, icon: '🤖', label: 'Agent' },
+  { id: 'details' as const, icon: <span style={{ fontSize: '1.1em' }}>👤</span>, label: 'My Details' },
+  { id: 'documents' as const, icon: <span style={{ fontSize: '1.1em' }}>📄</span>, label: 'Docs' },
+  { 
+    id: 'agent' as const, 
+    icon: (
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style={{ display: 'block', filter: 'drop-shadow(0 2px 6px rgba(0,212,255,0.4))' }}>
+        <path d="M12 2V6M12 18V22M6 12H2M22 12H18M19.07 4.93L16.24 7.76M7.76 16.24L4.93 19.07M19.07 19.07L16.24 16.24M7.76 7.76L4.93 4.93" stroke="url(#nav_paint0_linear)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+        <circle cx="12" cy="12" r="4" fill="url(#nav_paint0_linear)"/>
+        <defs>
+          <linearGradient id="nav_paint0_linear" x1="2" y1="2" x2="22" y2="22" gradientUnits="userSpaceOnUse">
+            <stop stopColor="var(--color-pc-accent-start)"/>
+            <stop offset="1" stopColor="var(--color-pc-accent-end)"/>
+          </linearGradient>
+        </defs>
+      </svg>
+    ), 
+    label: 'Agent' 
+  },
 ];
 
 export default function Navigation({ activeTab, onTabChange }: NavigationProps) {

@@ -267,21 +267,80 @@ const FIELD_DICTIONARY: FieldPattern[] = [
  * Generate a unique CSS selector for an element.
  */
 function getUniqueSelector(el: Element): string {
-  if (el.id) return `#${CSS.escape(el.id)}`;
+  const tag = el.tagName.toLowerCase();
 
+  // 1. Stable name attribute — most reliable on Adobe/Workday/Greenhouse React forms
+  //    because `name` is set by the developer, while `id` is often generated/random.
+  //    Scope by tag+name to avoid ambiguity (e.g. two inputs with same name in
+  //    different forms, or a <select> and <input> sharing a name).
+  const name = (el as HTMLElement).getAttribute('name');
+  if (name) {
+    const escaped = CSS.escape(name);
+    const byTagAndName = document.querySelectorAll(`${tag}[name="${escaped}"]`);
+    if (byTagAndName.length === 1) {
+      // Unique on the page — perfectly stable selector
+      return `${tag}[name="${escaped}"]`;
+    }
+    // Multiple elements share this name (e.g. radio buttons) — use positional index
+    const idx = Array.from(byTagAndName).indexOf(el) + 1;
+    return `${tag}[name="${escaped}"]:nth-of-type(${idx})`;
+  }
+
+  // 2. Stable autocomplete attribute — set by the site, not generated
+  const autocomplete = (el as HTMLElement).getAttribute('autocomplete');
+  if (autocomplete && autocomplete !== 'off' && autocomplete !== 'on') {
+    const escaped = CSS.escape(autocomplete);
+    const byAc = document.querySelectorAll(`${tag}[autocomplete="${escaped}"]`);
+    if (byAc.length === 1) return `${tag}[autocomplete="${escaped}"]`;
+  }
+
+  // 3. ID — only use when it looks stable (not a generated hash/uuid).
+  //    Generated IDs typically contain long hex runs, UUIDs, or pure numbers.
+  //    Developer-set IDs are usually short camelCase/kebab-case words.
+  if (el.id) {
+    const id = el.id;
+    const looksGenerated =
+      /^[a-f0-9]{8,}$/i.test(id) ||          // hex hash
+      /[a-f0-9]{8}-[a-f0-9]{4}-/i.test(id) || // UUID
+      /^\d+$/.test(id) ||                       // pure number
+      id.length > 40;                            // suspiciously long
+
+    if (!looksGenerated) {
+      return `#${CSS.escape(id)}`;
+    }
+  }
+
+  // 4. Fallback — structural path from closest stable ancestor
   const path: string[] = [];
   let current: Element | null = el;
   while (current && current !== document.body) {
     let selector = current.tagName.toLowerCase();
-    if (current.id) {
-      selector = `#${CSS.escape(current.id)}`;
+
+    // Anchor to a stable id or name on any ancestor
+    const ancestorName = (current as HTMLElement).getAttribute('name');
+    if (ancestorName) {
+      selector = `${current.tagName.toLowerCase()}[name="${CSS.escape(ancestorName)}"]`;
       path.unshift(selector);
       break;
     }
-    const parent = current.parentElement;
+    if (current.id) {
+      const id = current.id;
+      const looksGenerated =
+        /^[a-f0-9]{8,}$/i.test(id) ||
+        /[a-f0-9]{8}-[a-f0-9]{4}-/i.test(id) ||
+        /^\d+$/.test(id) ||
+        id.length > 40;
+      if (!looksGenerated) {
+        selector = `#${CSS.escape(id)}`;
+        path.unshift(selector);
+        break;
+      }
+    }
+
+    const parent: Element | null = current.parentElement;
     if (parent) {
       const siblings = Array.from(parent.children).filter(
-        (c) => c.tagName === current!.tagName,
+        (c: Element) => c.tagName === current!.tagName,
       );
       if (siblings.length > 1) {
         const index = siblings.indexOf(current) + 1;
@@ -424,18 +483,25 @@ function matchField(
  * Returns detected fields with their matched profile keys and categories.
  */
 export function scanPageFields(): DetectedField[] {
+  // Skip hidden background iframes (LinkedIn OAuth, Dropbox, upload SDKs, etc.)
+  // These frames have zero or near-zero viewport size — they're not job form pages.
+  // Only skip when we're inside an iframe (window.self !== window.top).
+  if (window.self !== window.top) {
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    // A visible iframe used as an embedded form would be at least 200×100px.
+    // Hidden background iframes are 0×0 or 1×1.
+    if (w < 200 || h < 100) return [];
+  }
+
   const elements = document.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>(
-    'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"]):not([type="file"]), select, textarea',
+    'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"]), select, textarea',
   );
 
   const detected: DetectedField[] = [];
 
   for (const el of elements) {
-    // Skip truly invisible elements (display:none or visibility:hidden).
-    // Do NOT use offsetParent — it returns null for elements inside position:fixed
-    // containers (e.g. Adobe/Workday modals), falsely treating them as hidden.
-    const cs = getComputedStyle(el);
-    if (cs.display === 'none' || cs.visibility === 'hidden') continue;
+    if (!isRenderedField(el)) continue;
 
     const attributes: DetectedField['attributes'] = {
       name: el.getAttribute('name') || undefined,
@@ -494,6 +560,13 @@ export function scanPageFields(): DetectedField[] {
 
 import type { SanitizedField, FieldIdLookup } from '../types/aiMapper';
 
+function isRenderedField(el: HTMLElement): boolean {
+  const style = getComputedStyle(el);
+  return style.display !== 'none'
+    && style.visibility !== 'hidden'
+    && el.getClientRects().length > 0;
+}
+
 /**
  * Extract sanitized field descriptors for AI mapping.
  * DELIBERATELY strips: values, textContent, surrounding page text.
@@ -505,6 +578,13 @@ export function extractSanitizedFields(): {
   sanitizedFields: SanitizedField[];
   selectorLookup: FieldIdLookup;
 } {
+  // Same hidden-iframe guard as scanPageFields
+  if (window.self !== window.top) {
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    if (w < 200 || h < 100) return { sanitizedFields: [], selectorLookup: {} };
+  }
+
   const elements = document.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>(
     'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"]):not([type="file"]), select, textarea',
   );
@@ -514,8 +594,7 @@ export function extractSanitizedFields(): {
   let index = 0;
 
   for (const el of elements) {
-    // Skip invisible elements
-    if (el.offsetParent === null && el.getAttribute('type') !== 'hidden') continue;
+    if (!isRenderedField(el)) continue;
 
     const fieldId = `f${index}`;
     const selector = getUniqueSelector(el);

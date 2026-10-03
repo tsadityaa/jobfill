@@ -8,9 +8,10 @@ interface DocumentCardProps {
   onPreview: (doc: StoredDocument) => void;
   onProcess: (doc: StoredDocument) => void;
   onDelete: (doc: StoredDocument) => void;
+  onUploadToPage?: (doc: StoredDocument) => void;
 }
 
-export default function DocumentCard({ doc, onDownload, onEdit, onPreview, onProcess, onDelete }: DocumentCardProps) {
+export default function DocumentCard({ doc, onDownload, onEdit, onPreview, onProcess, onDelete, onUploadToPage }: DocumentCardProps) {
   const isImage = isImageType(doc.mimeType);
   const isPdf = doc.mimeType === 'application/pdf';
   const isWord = isWordType(doc.mimeType);
@@ -45,6 +46,9 @@ export default function DocumentCard({ doc, onDownload, onEdit, onPreview, onPro
 
       {/* Actions */}
       <div className="doc-card-actions">
+        {onUploadToPage && (
+          <button className="btn btn-ghost btn-sm" onClick={() => onUploadToPage(doc)} title="Upload to current page" style={{ color: 'var(--color-pc-success)' }}>📤</button>
+        )}
         <button className="btn btn-ghost btn-sm" onClick={() => onDownload(doc)} title="Download original">⬇</button>
         {isImage && (
           <button className="btn btn-ghost btn-sm" onClick={() => onEdit(doc)} title="Edit / Resize image">✏️</button>

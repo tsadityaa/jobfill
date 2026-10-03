@@ -405,6 +405,7 @@ export default function ProfileSection({ profile, onSave }: ProfileSectionProps)
           emptyLabel="No education added"
           createDefault={() => ({
             institution: '',
+            registrationNo: '',
             degree: '',
             field: '',
             current: false,
@@ -427,6 +428,16 @@ export default function ProfileSection({ profile, onSave }: ProfileSectionProps)
                     placeholder="University / College name"
                     value={d.institution ?? ''}
                     onChange={(e) => setDraft({ ...draft, institution: e.target.value })}
+                  />
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Registration No.</label>
+                  <input
+                    className="form-input"
+                    type="text"
+                    placeholder="e.g. 21BCS1234"
+                    value={d.registrationNo ?? ''}
+                    onChange={(e) => setDraft({ ...draft, registrationNo: e.target.value })}
                   />
                 </div>
                 <div className="form-row">

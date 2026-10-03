@@ -9,12 +9,13 @@ export default defineConfig({
     name: 'Personal Copilot',
     description: 'Your secure personal application assistant. Store details, autofill forms, manage documents.',
     version: '0.1.0',
-    permissions: ['storage', 'unlimitedStorage', 'activeTab', 'scripting', 'webNavigation'],
+    permissions: ['storage', 'unlimitedStorage', 'activeTab', 'scripting', 'webNavigation', 'identity'],
+    host_permissions: ['https://eneyoicwuqjdaonccqkm.supabase.co/*'],
     icons: {
-      '16': 'icon/icon.svg',
-      '32': 'icon/icon.svg',
-      '48': 'icon/icon.svg',
-      '128': 'icon/icon.svg',
+      '16': 'icon-16.png',
+      '32': 'icon-32.png',
+      '48': 'icon-48.png',
+      '128': 'icon-128.png',
     },
   },
   vite: () => ({

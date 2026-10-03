@@ -28,6 +28,7 @@ export default function ImageEditor({ imageBlob, fileName, onClose }: ImageEdito
   const [processing, setProcessing] = useState(false);
   const [previewSize, setPreviewSize] = useState<number | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [zoomed, setZoomed] = useState(false);
 
   // Load image on mount
   useEffect(() => {
@@ -139,11 +140,22 @@ export default function ImageEditor({ imageBlob, fileName, onClose }: ImageEdito
         </div>
 
         {/* Preview */}
-        <div className="image-editor-preview">
+        <div className="image-editor-preview" style={{ overflow: 'auto', position: 'relative' }}>
           <img
             src={previewUrl || imageUrl}
-            alt="Preview"
-            className="image-editor-img"
+            alt="Preview (Click to zoom)"
+            title="Click to zoom"
+            onClick={() => setZoomed(!zoomed)}
+            style={{
+              width: zoomed ? 'auto' : '100%',
+              height: zoomed ? 'auto' : '100%',
+              objectFit: zoomed ? 'none' : 'contain',
+              cursor: zoomed ? 'zoom-out' : 'zoom-in',
+              maxWidth: zoomed ? 'none' : '100%',
+              maxHeight: zoomed ? 'none' : '100%',
+              display: 'block',
+              margin: zoomed ? '0' : '0 auto',
+            }}
           />
         </div>
 
