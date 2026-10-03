@@ -12,11 +12,11 @@
 //   5. Popup click → reads cache → instant result
 // ============================================================
 
-import { scanPageFields, extractSanitizedFields } from '../utils/fieldDetector';
+import { hasVisibleFormFields, scanPageFields, extractSanitizedFields } from '../utils/fieldDetector';
 import { fillFields } from '../utils/formFiller';
 import { detectJobPage } from '../utils/jobPageDetector';
 import { computeFormFingerprint } from '../utils/formFingerprint';
-import type { ContentScriptRequest, ScanFieldsResponse, FillFieldsResponse, AIScanFieldsResponse, InjectFileResponse, DetectJobPageResponse, PrescanResponse } from '../types/messages';
+import type { ContentScriptRequest, ScanFieldsResponse, FillFieldsResponse, AIScanFieldsResponse, InjectFileResponse, DetectJobPageResponse, WaitForFormReadyResponse, PrescanResponse } from '../types/messages';
 import type { ScanResult } from '../types/autofill';
 
 function injectFile(fileName: string, mimeType: string, dataUrl: string): boolean {
@@ -104,6 +104,46 @@ function injectFile(fileName: string, mimeType: string, dataUrl: string): boolea
   return true;
 }
 
+function waitForFormReady(timeoutMs = 20000): Promise<WaitForFormReadyResponse> {
+  return new Promise((resolve) => {
+    let finished = false;
+    let mutationTimer: ReturnType<typeof setTimeout> | undefined;
+    let quietTimer: ReturnType<typeof setTimeout> | undefined;
+    let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+
+    const observer = new MutationObserver(scheduleCheck);
+    const finish = (ready: boolean) => {
+      if (finished) return;
+      finished = true;
+      observer.disconnect();
+      if (mutationTimer) clearTimeout(mutationTimer);
+      if (quietTimer) clearTimeout(quietTimer);
+      if (deadlineTimer) clearTimeout(deadlineTimer);
+      resolve({ type: 'WAIT_FOR_FORM_READY_RESULT', ready });
+    };
+    const check = () => {
+      if (!hasVisibleFormFields()) return;
+      quietTimer = setTimeout(() => {
+        if (hasVisibleFormFields()) finish(true);
+      }, 500);
+    };
+    function scheduleCheck() {
+      if (mutationTimer) clearTimeout(mutationTimer);
+      if (quietTimer) clearTimeout(quietTimer);
+      mutationTimer = setTimeout(check, 150);
+    }
+
+    observer.observe(document.documentElement, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      attributeFilter: ['class', 'style', 'hidden', 'aria-hidden'],
+    });
+    deadlineTimer = setTimeout(() => finish(false), timeoutMs);
+    scheduleCheck();
+  });
+}
+
 export default defineContentScript({
   matches: ['<all_urls>'],
   allFrames: true,
@@ -115,7 +155,7 @@ export default defineContentScript({
       (
         message: ContentScriptRequest,
         _sender,
-        sendResponse: (response: ScanFieldsResponse | FillFieldsResponse | AIScanFieldsResponse | InjectFileResponse | DetectJobPageResponse | PrescanResponse) => void,
+        sendResponse: (response: ScanFieldsResponse | FillFieldsResponse | AIScanFieldsResponse | InjectFileResponse | DetectJobPageResponse | WaitForFormReadyResponse | PrescanResponse) => void,
       ) => {
         switch (message.type) {
           case 'SCAN_FIELDS': {
@@ -148,6 +188,11 @@ export default defineContentScript({
             console.log(`[JobFill] Page classification: ${classification} (score: ${score})`);
             sendResponse({ type: 'DETECT_JOB_PAGE_RESULT', classification, score });
             break;
+          }
+
+          case 'WAIT_FOR_FORM_READY': {
+            waitForFormReady().then(sendResponse);
+            return true;
           }
 
           case 'PRESCAN': {

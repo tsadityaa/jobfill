@@ -494,9 +494,7 @@ export function scanPageFields(): DetectedField[] {
     if (w < 200 || h < 100) return [];
   }
 
-  const elements = document.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>(
-    'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"]), select, textarea',
-  );
+  const elements = document.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>(FILLABLE_FIELDS_SELECTOR);
 
   const detected: DetectedField[] = [];
 
@@ -554,6 +552,15 @@ export function scanPageFields(): DetectedField[] {
   }
 
   return detected;
+}
+
+const FILLABLE_FIELDS_SELECTOR =
+  'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"]), select, textarea';
+
+export function hasVisibleFormFields(): boolean {
+  if (window.self !== window.top && (window.innerWidth < 200 || window.innerHeight < 100)) return false;
+  const elements = document.querySelectorAll<HTMLElement>(FILLABLE_FIELDS_SELECTOR);
+  return Array.from(elements).some(isRenderedField);
 }
 
 // ---- AI Layer: Sanitized Field Extraction ----

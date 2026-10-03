@@ -21,7 +21,7 @@ import {
   setTabResult,
   clearTabResult,
 } from '../utils/mappingCache';
-import type { DetectJobPageResponse, PrescanResponse } from '../types/messages';
+import type { DetectJobPageResponse, PrescanResponse, WaitForFormReadyResponse } from '../types/messages';
 import type { FieldMapping } from '../types/autofill';
 import type { SanitizedField, FieldIdLookup } from '../types/aiMapper';
 
@@ -77,6 +77,27 @@ async function runPrescanPipeline(tabId: number): Promise<void> {
     }
 
     console.log(`[JobFill BG] Tab ${tabId}: job page detected (${detectResp?.classification}) — starting pre-scan`);
+
+    // Workday and other SPA forms can hydrate after document_idle. Wait for
+    // visible controls and a short DOM quiet period before taking the one snapshot.
+    let readiness: WaitForFormReadyResponse;
+    try {
+      readiness = await chrome.tabs.sendMessage(
+        tabId,
+        { type: 'WAIT_FOR_FORM_READY' },
+        { frameId: 0 },
+      ) as WaitForFormReadyResponse;
+    } catch (err) {
+      console.warn(`[JobFill BG] Tab ${tabId}: form readiness check failed`, err);
+      await setTabResult({ tabId, scanResult: null, aiMappings: [], aiMappedCount: 0, status: 'error', fingerprint: null });
+      return;
+    }
+
+    if (!readiness?.ready) {
+      console.warn(`[JobFill BG] Tab ${tabId}: no visible form became ready before timeout`);
+      await setTabResult({ tabId, scanResult: null, aiMappings: [], aiMappedCount: 0, status: 'error', fingerprint: null });
+      return;
+    }
 
     // Step 2: Pre-scan (regex + sanitized fields + fingerprint)
     // Always target the main frame — avoids picking up hidden iframe fields.

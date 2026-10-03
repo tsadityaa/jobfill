@@ -21,6 +21,10 @@ export interface DetectJobPageRequest {
   type: 'DETECT_JOB_PAGE';
 }
 
+export interface WaitForFormReadyRequest {
+  type: 'WAIT_FOR_FORM_READY';
+}
+
 /** Ask the content script to run a full pre-scan (detect + regex + sanitized fields + fingerprint) */
 export interface PrescanRequest {
   type: 'PRESCAN';
@@ -48,6 +52,11 @@ export interface DetectJobPageResponse {
   type: 'DETECT_JOB_PAGE_RESULT';
   classification: JobPageClassification;
   score: number;
+}
+
+export interface WaitForFormReadyResponse {
+  type: 'WAIT_FOR_FORM_READY_RESULT';
+  ready: boolean;
 }
 
 export interface PrescanResponse {
@@ -108,11 +117,13 @@ export type ExtensionMessage =
   | FillFieldsRequest
   | AIScanFieldsRequest
   | DetectJobPageRequest
+  | WaitForFormReadyRequest
   | PrescanRequest
   | ScanFieldsResponse
   | FillFieldsResponse
   | AIScanFieldsResponse
   | DetectJobPageResponse
+  | WaitForFormReadyResponse
   | PrescanResponse
   | GetProfileRequest
   | GetProfileResponse
@@ -126,6 +137,7 @@ export type ContentScriptRequest =
   | FillFieldsRequest
   | AIScanFieldsRequest
   | DetectJobPageRequest
+  | WaitForFormReadyRequest
   | PrescanRequest
   | InjectFileRequest;
 
@@ -134,5 +146,6 @@ export type ContentScriptResponse =
   | FillFieldsResponse
   | AIScanFieldsResponse
   | DetectJobPageResponse
+  | WaitForFormReadyResponse
   | PrescanResponse
   | InjectFileResponse;

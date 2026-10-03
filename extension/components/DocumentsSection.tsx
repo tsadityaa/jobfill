@@ -22,9 +22,16 @@ import PdfViewer from './PdfViewer';
 import PdfProcessor from './PdfProcessor';
 import { getCurrentUser } from '../utils/supabase';
 import { addMemory } from '../utils/memory';
-import { uploadToPdfCo, pdfToText } from '../utils/pdfco';
+import { downloadResult, uploadToPdfCo, pdfToText, wordToPdf } from '../utils/pdfco';
 
 const CATEGORIES: Array<'all' | DocumentCategory> = ['all', 'resume', 'photo', 'id', 'certificate', 'other'];
+
+function getUploadMimeType(file: File): string | null {
+  if (SUPPORTED_DOCUMENT_TYPES.includes(file.type.toLowerCase())) return file.type.toLowerCase();
+  if (/\.docx$/i.test(file.name)) return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+  if (/\.doc$/i.test(file.name)) return 'application/msword';
+  return null;
+}
 
 export default function DocumentsSection() {
   const [documents, setDocuments] = useState<StoredDocument[]>([]);
@@ -32,6 +39,8 @@ export default function DocumentsSection() {
   const [uploading, setUploading] = useState(false);
   const [activeCategory, setActiveCategory] = useState<'all' | DocumentCategory>('all');
   const [dragOver, setDragOver] = useState(false);
+  const [convertingDocId, setConvertingDocId] = useState<string | null>(null);
+  const [conversionNotice, setConversionNotice] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Image editor state
@@ -86,15 +95,18 @@ export default function DocumentsSection() {
     setUploading(true);
 
     for (const file of Array.from(files)) {
-      if (!SUPPORTED_DOCUMENT_TYPES.includes(file.type)) {
+      const mimeType = getUploadMimeType(file);
+      if (!mimeType) {
         console.warn(`Unsupported file type: ${file.type}`);
         continue;
       }
 
       try {
         const id = generateId();
-        const category = guessCategoryFromFile(file);
-        const isImage = isImageType(file.type);
+        const category = mimeType.includes('word') || mimeType.includes('officedocument')
+          ? 'resume'
+          : guessCategoryFromFile(file);
+        const isImage = isImageType(mimeType);
         // Word files get a document icon thumbnail placeholder
 
         let width: number | undefined;
@@ -113,7 +125,7 @@ export default function DocumentsSection() {
           id,
           name: file.name.replace(/\.[^.]+$/, ''), // Strip extension for display name
           originalName: file.name,
-          mimeType: file.type,
+          mimeType,
           category,
           sizeBytes: file.size,
           width,
@@ -127,7 +139,7 @@ export default function DocumentsSection() {
         setDocuments((prev) => [metadata, ...prev]);
         
         // --- Memory Engine: Ingest Resume ---
-        if (category === 'resume' && file.type === 'application/pdf') {
+        if (category === 'resume' && mimeType === 'application/pdf') {
           try {
             const user = await getCurrentUser();
             if (user) {
@@ -260,6 +272,45 @@ export default function DocumentsSection() {
     }
   }, []);
 
+  const handleConvertWordToPdf = useCallback(async (doc: StoredDocument) => {
+    setConvertingDocId(doc.id);
+    setConversionNotice(null);
+    try {
+      setConversionNotice({ type: 'success', message: `Uploading ${doc.originalName} to PDF.co…` });
+      const sourceBlob = await loadDocumentBlob(doc.id);
+      const sourceUrl = await uploadToPdfCo(sourceBlob, doc.originalName);
+      setConversionNotice({ type: 'success', message: 'Converting Word document to PDF…' });
+      const resultUrl = await wordToPdf(sourceUrl);
+      const resultBlob = await downloadResult(resultUrl);
+      const pdfBlob = resultBlob.type === 'application/pdf'
+        ? resultBlob
+        : new Blob([resultBlob], { type: 'application/pdf' });
+      const outputName = `${doc.originalName.replace(/\.docx?$/i, '')}.pdf`;
+      const now = new Date().toISOString();
+      const pdfDocument: StoredDocument = {
+        id: generateId(),
+        name: outputName.replace(/\.pdf$/i, ''),
+        originalName: outputName,
+        mimeType: 'application/pdf',
+        category: doc.category,
+        sizeBytes: pdfBlob.size,
+        createdAt: now,
+        updatedAt: now,
+      };
+
+      await saveDocument(pdfDocument, pdfBlob);
+      setDocuments((current) => [pdfDocument, ...current]);
+      setConversionNotice({ type: 'success', message: `Saved ${outputName} to Documents.` });
+    } catch (err) {
+      setConversionNotice({
+        type: 'error',
+        message: err instanceof Error ? err.message : 'Word-to-PDF conversion failed.',
+      });
+    } finally {
+      setConvertingDocId(null);
+    }
+  }, []);
+
   // Filter by category
   const filteredDocs = activeCategory === 'all'
     ? documents
@@ -289,7 +340,7 @@ export default function DocumentsSection() {
           ref={fileInputRef}
           type="file"
           multiple
-          accept={SUPPORTED_DOCUMENT_TYPES.join(',')}
+          accept={`${SUPPORTED_DOCUMENT_TYPES.join(',')},.doc,.docx`}
           style={{ display: 'none' }}
           onChange={(e) => {
             if (e.target.files?.length) {
@@ -310,6 +361,23 @@ export default function DocumentsSection() {
           Images, PDF, Word (.doc, .docx)
         </div>
       </div>
+
+      {conversionNotice && (
+        <div
+          role="status"
+          aria-live="polite"
+          style={{
+            marginTop: '8px',
+            padding: '8px 10px',
+            border: `1px solid ${conversionNotice.type === 'error' ? 'var(--color-pc-error)' : 'var(--color-pc-border)'}`,
+            borderRadius: '6px',
+            color: conversionNotice.type === 'error' ? 'var(--color-pc-error)' : 'var(--color-pc-text-secondary)',
+            fontSize: '0.74rem',
+          }}
+        >
+          {conversionNotice.message}
+        </div>
+      )}
 
       {/* Category Filter */}
       {documents.length > 0 && (
@@ -344,6 +412,8 @@ export default function DocumentsSection() {
               onEdit={handleEdit}
               onPreview={handlePreview}
               onProcess={(d) => setProcessorDocId(d.id)}
+              onConvertToPdf={handleConvertWordToPdf}
+              converting={convertingDocId !== null}
               onDelete={handleDelete}
               onUploadToPage={handleUploadToPage}
             />
