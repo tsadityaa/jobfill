@@ -51,7 +51,7 @@ export default function ScanLoader({ mode }: ScanLoaderProps) {
     return () => clearInterval(iv);
   }, [lines.length]);
 
-  const title   = mode === 'scanning' ? 'Scanning'   : mode === 'filling' ? 'Filling'      : 'AI Mapping';
+  const title   = mode === 'scanning' ? 'AI Mapping' : mode === 'filling' ? 'Filling' : 'AI Mapping';
   const accent1 = mode === 'scanning' ? '#00d4ff'    : mode === 'filling' ? '#00ff87'       : '#00d4ff';
   const accent2 = mode === 'scanning' ? '#00ff87'    : mode === 'filling' ? '#ffb300'       : '#00ff87';
 

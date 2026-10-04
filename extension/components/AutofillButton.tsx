@@ -16,7 +16,7 @@ interface AutofillButtonProps {
   profile: UserProfile;
 }
 
-type AutofillState = 'idle' | 'scanning' | 'filling' | 'filled' | 'error';
+type AutofillState = 'idle' | 'scanning' | 'ai_mapping' | 'filling' | 'filled' | 'error';
 
 /**
  * Send a message to the relevant frames in a tab and collect responses.
@@ -173,7 +173,7 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
     setQuestionTasks([]);
     setQuestionWatchTabId(tabId);
     setFileUploadTasks([]);
-    setState('filling');
+    setState(mappingIsPending ? 'ai_mapping' : 'filling');
 
     void chrome.runtime.sendMessage({ type: 'TRIGGER_AUTOFILL', tabId, profileMappingPending: mappingIsPending });
     void chrome.runtime.sendMessage({ type: 'TRIGGER_FILE_UPLOADS', tabId });
@@ -203,7 +203,7 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
       ...fillSummary,
       fields: [],
     });
-    setState('filled');
+    if (!mappingIsPending) setState('filled');
     chrome.runtime.sendMessage({ type: 'UPDATE_BADGE', count: result.mappedFields });
 
     if (mappingIsPending) {
@@ -222,8 +222,10 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
             .filter((mapping) => mapping.value.length > 0);
           setAiMappedCount(resolved.length);
           setScanResult(latest.scanResult ?? result);
+          setState('filled');
           break;
         }
+        setState('filled');
       })();
     }
   };
@@ -356,6 +358,7 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
 
       // Step 2: If there are UNKNOWN fields, try AI mapping (Layer 3)
       if (unknownFields.length > 0) {
+        setState('ai_mapping');
         try {
           // Get sanitized fields from the main frame
           const aiScanResponses = await sendToAllFrames<AIScanFieldsResponse>(
@@ -543,6 +546,8 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
       )}
 
       {state === 'scanning' && <ScanLoader mode="scanning" />}
+
+      {state === 'ai_mapping' && <ScanLoader mode="ai" />}
 
       {state === 'filling' && <ScanLoader mode="filling" />}
 
