@@ -113,12 +113,9 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
   const [fillResult, setFillResult] = useState<AutofillResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [aiMappedCount, setAiMappedCount] = useState(0);
-  const [mappingPending, setMappingPending] = useState(false);
   const [questionTasks, setQuestionTasks] = useState<QuestionTask[]>([]);
-  const [questionStateObserved, setQuestionStateObserved] = useState(false);
   const [questionWatchTabId, setQuestionWatchTabId] = useState<number | null>(null);
   const [fileUploadTasks, setFileUploadTasks] = useState<FileUploadTask[]>([]);
-  const [fileStateObserved, setFileStateObserved] = useState(false);
 
   useEffect(() => {
     if (questionWatchTabId === null) return;
@@ -129,8 +126,6 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
       const questionState = await getQuestionState(questionWatchTabId);
       const fileState = await getFileUploadState(questionWatchTabId);
       if (!active) return;
-      setQuestionStateObserved(Boolean(questionState));
-      setFileStateObserved(Boolean(fileState));
       const tasks = questionState?.tasks ?? [];
       const currentFileTasks = fileState?.tasks ?? [];
       setQuestionTasks(tasks);
@@ -162,12 +157,9 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
         setFillResult(null);
         setError(null);
         setAiMappedCount(0);
-        setMappingPending(false);
         setQuestionTasks([]);
-        setQuestionStateObserved(false);
         setQuestionWatchTabId(null);
         setFileUploadTasks([]);
-        setFileStateObserved(false);
       });
     };
 
@@ -178,12 +170,9 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
   const fillPreparedWork = async (tabId: number, result: ScanResult, mappings: FieldMapping[], mappingIsPending: boolean) => {
     setScanResult(result);
     setAiMappedCount(mappings.length);
-    setMappingPending(mappingIsPending);
     setQuestionTasks([]);
-    setQuestionStateObserved(false);
     setQuestionWatchTabId(tabId);
     setFileUploadTasks([]);
-    setFileStateObserved(false);
     setState('filling');
 
     void chrome.runtime.sendMessage({ type: 'TRIGGER_AUTOFILL', tabId, profileMappingPending: mappingIsPending });
@@ -235,7 +224,6 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
           setScanResult(latest.scanResult ?? result);
           break;
         }
-        setMappingPending(false);
       })();
     }
   };
@@ -246,9 +234,7 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
     setScanResult(null);
     setFillResult(null);
     setAiMappedCount(0);
-    setMappingPending(false);
     setQuestionTasks([]);
-    setQuestionStateObserved(false);
     setQuestionWatchTabId(null);
 
     try {
@@ -472,12 +458,9 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
     setFillResult(null);
     setError(null);
     setAiMappedCount(0);
-    setMappingPending(false);
     setQuestionTasks([]);
-    setQuestionStateObserved(false);
     setQuestionWatchTabId(null);
     setFileUploadTasks([]);
-    setFileStateObserved(false);
   };
 
   return (
@@ -515,92 +498,24 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
               </span>
             </div>
           )}
-          {fillResult.errors > 0 && (
-            <div className="autofill-result-row">
-              <span className="label">Errors</span>
-              <span className="value error">✗ {fillResult.errors}</span>
-            </div>
-          )}
         </div>
       )}
 
-      {mappingPending && (
+      {questionTasks.filter((task) => task.status === 'FILLED').length > 0 && (
         <div className="autofill-result animate-fade-in" aria-live="polite">
           <div className="autofill-result-row">
-            <span className="label">AI mapping</span>
-            <span className="value" style={{ color: 'var(--color-pc-accent-start)' }}>
-              <span aria-hidden="true" style={{ display: 'inline-block', animation: 'spin 0.65s linear infinite' }}>⟳</span> Running
-            </span>
+            <span className="label">Answers filled</span>
+            <span className="value success">✓ {questionTasks.filter((task) => task.status === 'FILLED').length}</span>
           </div>
         </div>
       )}
 
-      {questionStateObserved && (
+      {fileUploadTasks.filter((task) => task.status === 'UPLOADED').length > 0 && (
         <div className="autofill-result animate-fade-in" aria-live="polite">
-          {questionTasks.length === 0 ? (
-            <div className="autofill-result-row">
-              <span className="label">Text answers</span>
-              <span className="value" style={{ color: 'var(--color-pc-text-muted)' }}>No question fields detected</span>
-            </div>
-          ) : (
-            <>
-              {questionTasks.some((task) => ['RETRIEVING', 'GENERATING', 'FILLING', 'READY_TO_FILL'].includes(task.status)) && (
-                <div className="autofill-result-row">
-                  <span className="label">Text answers</span>
-                  <span className="value" style={{ color: '#3b82f6' }}>
-                    <span aria-hidden="true" style={{ display: 'inline-block', animation: 'spin 0.65s linear infinite' }}>⟳</span> Working
-                  </span>
-                </div>
-              )}
-              {questionTasks.filter((task) => task.status === 'FILLED').length > 0 && (
-                <div className="autofill-result-row">
-                  <span className="label">Answers filled</span>
-                  <span className="value success">✓ {questionTasks.filter((task) => task.status === 'FILLED').length}</span>
-                </div>
-              )}
-              {questionTasks.some((task) => task.status === 'ERROR') && (
-                <div className="autofill-result-row">
-                  <span className="label">Answer issue</span>
-                  <span className="value error">{questionTasks.filter((task) => task.status === 'ERROR').length} unavailable</span>
-                </div>
-              )}
-              {questionTasks.find((task) => task.status === 'ERROR')?.error && (
-                <div style={{ fontSize: '0.72rem', color: 'var(--color-pc-error)', paddingTop: '4px' }}>
-                  {questionTasks.find((task) => task.status === 'ERROR')?.error}
-                </div>
-              )}
-            </>
-          )}
-        </div>
-      )}
-
-      {fileStateObserved && fileUploadTasks.length > 0 && (
-        <div className="autofill-result animate-fade-in" aria-live="polite">
-          {fileUploadTasks.some((task) => ['CLASSIFYING', 'MATCHED', 'UPLOADING'].includes(task.status)) && (
-            <div className="autofill-result-row">
-              <span className="label">Documents</span>
-              <span className="value" style={{ color: 'var(--color-pc-accent-start)' }}>
-                <span aria-hidden="true" style={{ display: 'inline-block', animation: 'spin 0.65s linear infinite' }}>⟳</span> Matching / uploading
-              </span>
-            </div>
-          )}
-          {fileUploadTasks.filter((task) => task.status === 'UPLOADED').length > 0 && (
-            <div className="autofill-result-row">
-              <span className="label">Documents uploaded</span>
-              <span className="value success">✓ {fileUploadTasks.filter((task) => task.status === 'UPLOADED').length}</span>
-            </div>
-          )}
-          {fileUploadTasks.some((task) => task.status === 'ERROR') && (
-            <div className="autofill-result-row">
-              <span className="label">Document issue</span>
-              <span className="value error">{fileUploadTasks.filter((task) => task.status === 'ERROR').length} unavailable</span>
-            </div>
-          )}
-          {fileUploadTasks.find((task) => task.status === 'ERROR')?.error && (
-            <div style={{ fontSize: '0.72rem', color: 'var(--color-pc-error)', paddingTop: '4px' }}>
-              {fileUploadTasks.find((task) => task.status === 'ERROR')?.error}
-            </div>
-          )}
+          <div className="autofill-result-row">
+            <span className="label">Documents uploaded</span>
+            <span className="value success">✓ {fileUploadTasks.filter((task) => task.status === 'UPLOADED').length}</span>
+          </div>
         </div>
       )}
 
