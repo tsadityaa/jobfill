@@ -38,6 +38,7 @@ export interface FillFieldsRequest {
 
 export interface InjectFileRequest {
   type: 'INJECT_FILE';
+  selector?: string;
   fileName: string;
   mimeType: string;
   dataUrl: string;

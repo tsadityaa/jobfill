@@ -100,9 +100,18 @@ function observeFormStructureChanges(): void {
   });
 }
 
-function injectFile(fileName: string, mimeType: string, dataUrl: string): boolean {
+function injectFile(fileName: string, mimeType: string, dataUrl: string, selector?: string): boolean {
   const fileInputs = document.querySelectorAll<HTMLInputElement>('input[type="file"]');
-  if (fileInputs.length === 0) return false;
+  if (fileInputs.length === 0 && !selector) return false;
+
+  let targetInput: HTMLInputElement;
+  if (selector) {
+    const element = getElementBySelector(selector);
+    if (!(element instanceof HTMLInputElement) || element.type !== 'file') return false;
+    targetInput = element;
+  } else {
+    targetInput = fileInputs[0];
+  }
 
   // Convert base64 data URL back to a File object
   const [, b64data] = dataUrl.split(',');
@@ -112,12 +121,21 @@ function injectFile(fileName: string, mimeType: string, dataUrl: string): boolea
     bytes[i] = binary.charCodeAt(i);
   }
   const file = new File([bytes], fileName, { type: mimeType });
+  const acceptedTypes = targetInput.accept.split(',').map((item) => item.trim().toLowerCase()).filter(Boolean);
+  if (acceptedTypes.length > 0) {
+    const extension = `.${fileName.split('.').pop()?.toLowerCase() ?? ''}`;
+    const isAccepted = acceptedTypes.some((accepted) =>
+      accepted === extension
+      || accepted === mimeType.toLowerCase()
+      || (accepted.endsWith('/*') && mimeType.toLowerCase().startsWith(accepted.slice(0, -1))),
+    );
+    if (!isAccepted) return false;
+  }
 
-  // Try to find the best matching file input using label text
-  let targetInput: HTMLInputElement = fileInputs[0];
+  // Keep legacy manual upload behavior when no field selector is specified.
   const fileNameLower = fileName.toLowerCase();
 
-  for (const input of fileInputs) {
+  if (!selector) for (const input of fileInputs) {
     const label = input.getAttribute('aria-label')?.toLowerCase() ?? '';
     const name = input.getAttribute('name')?.toLowerCase() ?? '';
     const accept = input.getAttribute('accept')?.toLowerCase() ?? '';
@@ -351,7 +369,7 @@ export default defineContentScript({
 
           case 'INJECT_FILE': {
             try {
-              const success = injectFile(message.fileName, message.mimeType, message.dataUrl);
+              const success = injectFile(message.fileName, message.mimeType, message.dataUrl, message.selector);
               if (success) {
                 console.log(`[JobFill] Injected file "${message.fileName}" into file input`);
                 sendResponse({ type: 'INJECT_FILE_RESULT', success: true, message: `Uploaded "${message.fileName}" successfully.` });

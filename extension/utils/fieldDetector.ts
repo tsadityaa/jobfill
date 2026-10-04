@@ -550,7 +550,9 @@ export function scanPageFields(): DetectedField[] {
   const detected: DetectedField[] = [];
 
   for (const el of elements) {
-    if (!isRenderedField(el)) continue;
+    const isFileInput = el instanceof HTMLInputElement && el.type === 'file';
+    const fileInputLabel = isFileInput ? getVisibleFileInputLabel(el) : undefined;
+    if (!isRenderedField(el) && !fileInputLabel) continue;
 
     const attributes: DetectedField['attributes'] = {
       name: el.getAttribute('name') || undefined,
@@ -558,7 +560,7 @@ export function scanPageFields(): DetectedField[] {
       autocomplete: el.getAttribute('autocomplete') || undefined,
       placeholder: el.getAttribute('placeholder') || undefined,
       ariaLabel: el.getAttribute('aria-label') || undefined,
-      labelText: getLabelText(el),
+      labelText: fileInputLabel || getLabelText(el),
       helpText: (el.getAttribute('aria-describedby') ?? '')
         .split(/\s+/)
         .map((id) => document.getElementById(id)?.textContent?.trim() ?? '')
@@ -567,6 +569,7 @@ export function scanPageFields(): DetectedField[] {
       maxLength: el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
         ? (el.maxLength > 0 ? el.maxLength : undefined)
         : undefined,
+      accept: el instanceof HTMLInputElement ? el.getAttribute('accept') || undefined : undefined,
     };
 
     const inputType = el instanceof HTMLInputElement ? (el.type || 'text') : el.tagName.toLowerCase();
@@ -591,6 +594,20 @@ export function scanPageFields(): DetectedField[] {
         confidence: 0,
         category: 'USER_DECISION_REQUIRED',
         currentValue: el.value || '',
+      });
+      continue;
+    }
+
+    if (el instanceof HTMLInputElement && el.type === 'file') {
+      detected.push({
+        selector: getUniqueSelector(el),
+        tagName: 'input',
+        inputType: 'file',
+        attributes,
+        profileField: null,
+        confidence: 1,
+        category: 'FILE_UPLOAD',
+        currentValue: '',
       });
       continue;
     }
@@ -624,7 +641,26 @@ const FILLABLE_FIELDS_SELECTOR =
 export function hasVisibleFormFields(): boolean {
   if (window.self !== window.top && (window.innerWidth < 200 || window.innerHeight < 100)) return false;
   const elements = queryAcrossOpenShadowRoots<HTMLElement>(FILLABLE_FIELDS_SELECTOR);
-  return elements.some(isRenderedField);
+  return elements.some((element) =>
+    isRenderedField(element)
+    || (element instanceof HTMLInputElement && element.type === 'file' && Boolean(getVisibleFileInputLabel(element))),
+  );
+}
+
+function getVisibleFileInputLabel(input: HTMLInputElement): string | undefined {
+  let ancestor = input.parentElement;
+  let depth = 0;
+  while (ancestor && depth < 5) {
+    const triggers = Array.from(ancestor.querySelectorAll<HTMLElement>('button, label, [role="button"]'));
+    for (const trigger of triggers) {
+      if (!isRenderedField(trigger)) continue;
+      const text = trigger.textContent?.replace(/\s+/g, ' ').trim();
+      if (text && text.length < 240) return text;
+    }
+    ancestor = ancestor.parentElement;
+    depth++;
+  }
+  return undefined;
 }
 
 // ---- AI Layer: Sanitized Field Extraction ----

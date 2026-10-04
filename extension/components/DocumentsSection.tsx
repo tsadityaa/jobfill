@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import type { StoredDocument, DocumentCategory } from '../types/document';
+import type { StoredDocument, DocumentCategory, DocumentType } from '../types/document';
 import {
   CATEGORY_LABELS,
   CATEGORY_ICONS,
@@ -23,6 +24,7 @@ import PdfProcessor from './PdfProcessor';
 import { getCurrentUser } from '../utils/supabase';
 import { addMemory } from '../utils/memory';
 import { downloadResult, uploadToPdfCo, pdfToText, wordToPdf } from '../utils/pdfco';
+import { saveDocumentRegistryMetadata, withInferredDocumentMetadata } from '../utils/documentRegistry';
 
 const CATEGORIES: Array<'all' | DocumentCategory> = ['all', 'resume', 'photo', 'id', 'certificate', 'other'];
 
@@ -103,9 +105,7 @@ export default function DocumentsSection() {
 
       try {
         const id = generateId();
-        const category = mimeType.includes('word') || mimeType.includes('officedocument')
-          ? 'resume'
-          : guessCategoryFromFile(file);
+        const category = guessCategoryFromFile(file);
         const isImage = isImageType(mimeType);
         // Word files get a document icon thumbnail placeholder
 
@@ -121,7 +121,7 @@ export default function DocumentsSection() {
         }
 
         const now = new Date().toISOString();
-        const metadata: StoredDocument = {
+        const metadata: StoredDocument = withInferredDocumentMetadata({
           id,
           name: file.name.replace(/\.[^.]+$/, ''), // Strip extension for display name
           originalName: file.name,
@@ -133,9 +133,13 @@ export default function DocumentsSection() {
           thumbnail,
           createdAt: now,
           updatedAt: now,
-        };
+        });
+        metadata.isPrimary = !documents.some((existing) =>
+          existing.documentType === metadata.documentType && existing.isPrimary,
+        );
 
         await saveDocument(metadata, file);
+        await saveDocumentRegistryMetadata(metadata);
         setDocuments((prev) => [metadata, ...prev]);
         
         // --- Memory Engine: Ingest Resume ---
@@ -233,6 +237,17 @@ export default function DocumentsSection() {
     } catch (err) {
       console.error('Delete failed:', err);
     }
+  }, []);
+
+  const handleDocumentTypeChange = useCallback(async (doc: StoredDocument, documentType: DocumentType) => {
+    const updated: StoredDocument = {
+      ...doc,
+      documentType,
+      tags: [documentType.replace(/_/g, ' ')],
+      updatedAt: new Date().toISOString(),
+    };
+    await saveDocumentRegistryMetadata(updated);
+    setDocuments((previous) => previous.map((item) => item.id === doc.id ? updated : item));
   }, []);
 
   // Upload document to current page's file input
@@ -414,6 +429,7 @@ export default function DocumentsSection() {
               onProcess={(d) => setProcessorDocId(d.id)}
               onConvertToPdf={handleConvertWordToPdf}
               converting={convertingDocId !== null}
+              onDocumentTypeChange={handleDocumentTypeChange}
               onDelete={handleDelete}
               onUploadToPage={handleUploadToPage}
             />

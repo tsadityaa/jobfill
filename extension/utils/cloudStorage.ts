@@ -11,6 +11,7 @@ import type { UserProfile } from '../types/profile';
 import type { StoredDocument } from '../types/document';
 import { createEmptyProfile } from '../types/profile';
 import { supabase, getCurrentUser } from './supabase';
+import { deleteDocumentRegistryMetadata, mergeDocumentRegistryMetadata } from './documentRegistry';
 
 // ---- Profile Operations ----
 
@@ -137,7 +138,7 @@ export async function cloudLoadAllDocumentMetadata(): Promise<StoredDocument[]> 
 
   if (error || !data) return [];
 
-  return data.map((doc) => ({
+  const documents = data.map((doc) => ({
     id: doc.id,
     name: doc.original_name,
     originalName: doc.original_name,
@@ -147,6 +148,7 @@ export async function cloudLoadAllDocumentMetadata(): Promise<StoredDocument[]> 
     createdAt: doc.created_at,
     updatedAt: doc.created_at,
   }));
+  return mergeDocumentRegistryMetadata(documents);
 }
 
 /** Load a document's file blob from Supabase Storage */
@@ -183,6 +185,8 @@ export async function cloudDeleteDocument(docId: string): Promise<void> {
     .delete()
     .eq('id', docId)
     .eq('user_id', user.id);
+
+  await deleteDocumentRegistryMetadata(docId);
 }
 
 /** Get document count for the current user */

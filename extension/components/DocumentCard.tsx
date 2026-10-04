@@ -1,5 +1,5 @@
-import type { StoredDocument } from '../types/document';
-import { CATEGORY_ICONS, formatFileSize, isImageType, isWordType } from '../types/document';
+import type { StoredDocument, DocumentType } from '../types/document';
+import { CATEGORY_ICONS, DOCUMENT_TYPE_LABELS, formatFileSize, isImageType, isWordType } from '../types/document';
 
 interface DocumentCardProps {
   doc: StoredDocument;
@@ -10,10 +10,11 @@ interface DocumentCardProps {
   onConvertToPdf: (doc: StoredDocument) => void;
   converting?: boolean;
   onDelete: (doc: StoredDocument) => void;
+  onDocumentTypeChange: (doc: StoredDocument, documentType: DocumentType) => void;
   onUploadToPage?: (doc: StoredDocument) => void;
 }
 
-export default function DocumentCard({ doc, onDownload, onEdit, onPreview, onProcess, onConvertToPdf, converting = false, onDelete, onUploadToPage }: DocumentCardProps) {
+export default function DocumentCard({ doc, onDownload, onEdit, onPreview, onProcess, onConvertToPdf, converting = false, onDelete, onDocumentTypeChange, onUploadToPage }: DocumentCardProps) {
   const isImage = isImageType(doc.mimeType);
   const isPdf = doc.mimeType === 'application/pdf';
   const isWord = isWordType(doc.mimeType) || /\.docx?$/i.test(doc.originalName);
@@ -44,6 +45,19 @@ export default function DocumentCard({ doc, onDownload, onEdit, onPreview, onPro
           <span>{formatFileSize(doc.sizeBytes)}</span>
           {doc.width && doc.height && <span> · {doc.width}×{doc.height}</span>}
           <span> · {typeLabel}</span>
+          <label style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '5px', fontSize: '0.68rem', color: 'var(--color-pc-text-muted)' }}>
+            Type
+            <select
+              value={doc.documentType ?? 'other'}
+              onChange={(event) => onDocumentTypeChange(doc, event.target.value as DocumentType)}
+              style={{ maxWidth: '170px', padding: '2px 4px', fontSize: '0.68rem' }}
+            >
+              {Object.entries(DOCUMENT_TYPE_LABELS).map(([value, label]) => (
+                <option key={value} value={value}>{label}</option>
+              ))}
+            </select>
+            {doc.isPrimary ? <span title="Preferred document for this type">Primary</span> : null}
+          </label>
         </div>
       </div>
 

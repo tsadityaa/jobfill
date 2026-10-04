@@ -16,6 +16,14 @@ export interface StoredDocument {
   mimeType: string;
   /** Document category */
   category: DocumentCategory;
+  /** Specific document purpose used when matching application upload fields. */
+  documentType?: DocumentType;
+  /** Searchable document descriptors inferred from its name or purpose. */
+  tags?: string[];
+  /** Optional edition/year parsed from the filename. */
+  version?: string;
+  /** Prefer this document when several match the same upload field. */
+  isPrimary?: boolean;
   /** File size in bytes */
   sizeBytes: number;
   /** Image width in pixels (images only) */
@@ -31,6 +39,42 @@ export interface StoredDocument {
 }
 
 export type DocumentCategory = 'resume' | 'photo' | 'id' | 'certificate' | 'other';
+export type DocumentType =
+  | 'resume'
+  | 'cover_letter'
+  | 'transcript'
+  | 'degree_certificate'
+  | 'certificate'
+  | 'photo'
+  | 'id'
+  | 'portfolio'
+  | 'other';
+
+export const DOCUMENT_TYPE_LABELS: Record<DocumentType, string> = {
+  resume: 'Resume / CV',
+  cover_letter: 'Cover letter',
+  transcript: 'Academic transcript',
+  degree_certificate: 'Degree certificate',
+  certificate: 'Certificate',
+  photo: 'Photo',
+  id: 'ID document',
+  portfolio: 'Portfolio / work sample',
+  other: 'Other',
+};
+
+export function inferDocumentType(name: string, category?: DocumentCategory): DocumentType {
+  const normalized = name.toLowerCase().replace(/[_-]+/g, ' ');
+  if (/\bcover\s*letter\b/.test(normalized)) return 'cover_letter';
+  if (/\b(transcript|mark\s*sheet|academic\s*record)\b/.test(normalized)) return 'transcript';
+  if (/\b(degree|diploma)\s*(certificate|cert)?\b|\bcertificate\s*of\s*(completion|degree)\b/.test(normalized)) return 'degree_certificate';
+  if (/\b(certification|certificate|cert)\b/.test(normalized)) return 'certificate';
+  if (/\b(resume|résumé|cv|curriculum\s*vitae)\b/.test(normalized)) return 'resume';
+  if (/\b(portfolio|work\s*sample)\b/.test(normalized)) return 'portfolio';
+  if (/\b(photo|headshot|passport\s*photo)\b/.test(normalized)) return 'photo';
+  if (/\b(passport|identity|\bid\b|license)\b/.test(normalized)) return 'id';
+    if (category === 'photo' || category === 'id' || category === 'certificate') return category;
+  return 'other';
+}
 
 export const CATEGORY_LABELS: Record<DocumentCategory, string> = {
   resume: 'Resume / CV',
@@ -146,23 +190,10 @@ export function formatFileSize(bytes: number): string {
 }
 
 export function guessCategoryFromFile(file: File): DocumentCategory {
-  const name = file.name.toLowerCase();
-  if (
-    file.type === 'application/pdf' ||
-    isWordType(file.type) ||
-    name.includes('resume') ||
-    name.includes('cv')
-  ) {
-    return 'resume';
-  }
-  if (name.includes('passport') || name.includes('license') || name.includes('id')) {
-    return 'id';
-  }
-  if (name.includes('cert') || name.includes('diploma') || name.includes('degree')) {
-    return 'certificate';
-  }
-  if (file.type.startsWith('image/')) {
-    return 'photo';
-  }
+  const documentType = inferDocumentType(file.name);
+  if (documentType === 'resume') return 'resume';
+  if (documentType === 'photo' || file.type.startsWith('image/')) return 'photo';
+  if (documentType === 'id') return 'id';
+  if (documentType === 'degree_certificate' || documentType === 'certificate') return 'certificate';
   return 'other';
 }

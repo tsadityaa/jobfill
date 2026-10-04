@@ -5,10 +5,12 @@ import type { ScanResult, AutofillResult, FieldMapping } from '../types/autofill
 import type { ScanFieldsResponse, FillFieldsResponse, AIScanFieldsResponse } from '../types/messages';
 import type { SanitizedField, FieldIdLookup } from '../types/aiMapper';
 import type { QuestionTask } from '../types/questionTask';
+import type { FileUploadTask } from '../types/fileUploadTask';
 import { createFieldMappings, resolveProfileValue } from '../utils/fieldMapper';
 import { mapFieldsWithAI } from '../utils/aiMapper';
 import { getTabResult, clearTabResult, GOOGLE_FORM_MAPPING_VERSION } from '../utils/mappingCache';
 import { getQuestionState } from '../utils/questionTaskStore';
+import { clearFileUploadState, getFileUploadState } from '../utils/fileUploadTaskStore';
 
 interface AutofillButtonProps {
   profile: UserProfile;
@@ -115,6 +117,8 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
   const [questionTasks, setQuestionTasks] = useState<QuestionTask[]>([]);
   const [questionStateObserved, setQuestionStateObserved] = useState(false);
   const [questionWatchTabId, setQuestionWatchTabId] = useState<number | null>(null);
+  const [fileUploadTasks, setFileUploadTasks] = useState<FileUploadTask[]>([]);
+  const [fileStateObserved, setFileStateObserved] = useState(false);
 
   useEffect(() => {
     if (questionWatchTabId === null) return;
@@ -123,11 +127,17 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
 
     const pollQuestionTasks = async () => {
       const questionState = await getQuestionState(questionWatchTabId);
+      const fileState = await getFileUploadState(questionWatchTabId);
       if (!active) return;
       setQuestionStateObserved(Boolean(questionState));
+      setFileStateObserved(Boolean(fileState));
       const tasks = questionState?.tasks ?? [];
+      const currentFileTasks = fileState?.tasks ?? [];
       setQuestionTasks(tasks);
-      if (tasks.length > 0 && tasks.some((task) => task.status === 'RETRIEVING' || task.status === 'GENERATING' || task.status === 'FILLING' || task.status === 'READY_TO_FILL')) {
+      setFileUploadTasks(currentFileTasks);
+      const questionsActive = tasks.some((task) => ['RETRIEVING', 'GENERATING', 'FILLING', 'READY_TO_FILL'].includes(task.status));
+      const filesActive = currentFileTasks.some((task) => ['CLASSIFYING', 'MATCHED', 'UPLOADING'].includes(task.status));
+      if (questionsActive || filesActive) {
         timeout = setTimeout(() => void pollQuestionTasks(), 300);
       }
     };
@@ -156,6 +166,8 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
         setQuestionTasks([]);
         setQuestionStateObserved(false);
         setQuestionWatchTabId(null);
+        setFileUploadTasks([]);
+        setFileStateObserved(false);
       });
     };
 
@@ -170,9 +182,12 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
     setQuestionTasks([]);
     setQuestionStateObserved(false);
     setQuestionWatchTabId(tabId);
+    setFileUploadTasks([]);
+    setFileStateObserved(false);
     setState('filling');
 
     void chrome.runtime.sendMessage({ type: 'TRIGGER_AUTOFILL', tabId, profileMappingPending: mappingIsPending });
+    void chrome.runtime.sendMessage({ type: 'TRIGGER_FILE_UPLOADS', tabId });
     const regexMappings = createFieldMappings(result.fields, profile);
     const regexSelectors = new Set(regexMappings.map((mapping) => mapping.selector));
     const combinedMappings = [
@@ -284,7 +299,7 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
 
       if (cached?.scanResult && cached.scanResult.totalFields > 0) {
         const questionSelectors = new Set(cached.scanResult.fields
-          .filter((field) => field.category === 'APPLICATION_QUESTION')
+          .filter((field) => field.category === 'APPLICATION_QUESTION' || field.category === 'FILE_UPLOAD')
           .map((field) => field.selector));
         const resolvedCachedMappings = cached.aiMappings
           .filter((mapping) => !questionSelectors.has(mapping.selector))
@@ -445,7 +460,10 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
     // on every mount, making stale cached selectors point to nothing.
     try {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-      if (tab?.id) await clearTabResult(tab.id);
+      if (tab?.id) {
+        await clearTabResult(tab.id);
+        await clearFileUploadState(tab.id);
+      }
     } catch {
       // Non-fatal — worst case the next scan runs the full pipeline
     }
@@ -458,6 +476,8 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
     setQuestionTasks([]);
     setQuestionStateObserved(false);
     setQuestionWatchTabId(null);
+    setFileUploadTasks([]);
+    setFileStateObserved(false);
   };
 
   return (
@@ -550,6 +570,36 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
                 </div>
               )}
             </>
+          )}
+        </div>
+      )}
+
+      {fileStateObserved && fileUploadTasks.length > 0 && (
+        <div className="autofill-result animate-fade-in" aria-live="polite">
+          {fileUploadTasks.some((task) => ['CLASSIFYING', 'MATCHED', 'UPLOADING'].includes(task.status)) && (
+            <div className="autofill-result-row">
+              <span className="label">Documents</span>
+              <span className="value" style={{ color: 'var(--color-pc-accent-start)' }}>
+                <span aria-hidden="true" style={{ display: 'inline-block', animation: 'spin 0.65s linear infinite' }}>⟳</span> Matching / uploading
+              </span>
+            </div>
+          )}
+          {fileUploadTasks.filter((task) => task.status === 'UPLOADED').length > 0 && (
+            <div className="autofill-result-row">
+              <span className="label">Documents uploaded</span>
+              <span className="value success">✓ {fileUploadTasks.filter((task) => task.status === 'UPLOADED').length}</span>
+            </div>
+          )}
+          {fileUploadTasks.some((task) => task.status === 'ERROR') && (
+            <div className="autofill-result-row">
+              <span className="label">Document issue</span>
+              <span className="value error">{fileUploadTasks.filter((task) => task.status === 'ERROR').length} unavailable</span>
+            </div>
+          )}
+          {fileUploadTasks.find((task) => task.status === 'ERROR')?.error && (
+            <div style={{ fontSize: '0.72rem', color: 'var(--color-pc-error)', paddingTop: '4px' }}>
+              {fileUploadTasks.find((task) => task.status === 'ERROR')?.error}
+            </div>
           )}
         </div>
       )}

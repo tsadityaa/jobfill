@@ -16,12 +16,14 @@
 import { mapFieldsWithAI } from '../utils/aiMapper';
 import { ALL_INTENT_KEYS } from '../types/aiMapper';
 import { resolveProfileValue } from '../utils/fieldMapper';
-import { cloudGetProfile } from '../utils/cloudStorage';
+import { cloudGetProfile, cloudLoadAllDocumentMetadata, cloudLoadDocumentBlob } from '../utils/cloudStorage';
 import { getCurrentUser } from '../utils/supabase';
 import { searchMemory } from '../utils/memory';
 import { formatProfileAnswerContext, generateApplicationAnswer } from '../utils/answerGenerator';
 import { detectApplicationQuestions } from '../utils/questionDetector';
+import { classifyDocumentField, selectDocumentForUpload } from '../utils/documentMatcher';
 import { clearQuestionState, getQuestionState, setQuestionAutofillRequested, setQuestionState, updateQuestionTask } from '../utils/questionTaskStore';
+import { clearFileUploadState, getFileUploadState, setFileAutofillRequested, setFileUploadState, updateFileUploadTask } from '../utils/fileUploadTaskStore';
 import {
   getCachedMapping,
   setCachedMapping,
@@ -35,6 +37,8 @@ import type { FieldMapping } from '../types/autofill';
 import type { ProfileFieldKey } from '../types/autofill';
 import type { SanitizedField, FieldIdLookup, GoogleFormLabelField } from '../types/aiMapper';
 import type { QuestionTask } from '../types/questionTask';
+import type { FileUploadTask } from '../types/fileUploadTask';
+import type { StoredDocument } from '../types/document';
 
 /** In-memory guard: prevent concurrent pre-scans for the same tab */
 const runningTabs = new Set<number>();
@@ -228,6 +232,122 @@ async function processQuestionTasks(tabId: number, tasks: QuestionTask[]): Promi
   }));
 }
 
+function getFileFieldLabel(field: PrescanResponse['scanResult']['fields'][number]): string {
+  return [field.attributes.labelText, field.attributes.ariaLabel, field.attributes.name, field.attributes.id]
+    .filter(Boolean)
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+async function blobToDataUrl(blob: Blob): Promise<string> {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return `data:${blob.type || 'application/octet-stream'};base64,${btoa(binary)}`;
+}
+
+async function uploadMatchedDocument(tabId: number, task: FileUploadTask): Promise<void> {
+  if (!task.documentId) return;
+  await updateFileUploadTask(tabId, task.fieldId, { status: 'UPLOADING' });
+  try {
+    const document = (await cloudLoadAllDocumentMetadata()).find((item) => item.id === task.documentId);
+    if (!document) throw new Error('The matched document is no longer in your document library.');
+    const blob = await cloudLoadDocumentBlob(document.id);
+    const dataUrl = await blobToDataUrl(blob);
+    const response = await chrome.tabs.sendMessage(
+      tabId,
+      {
+        type: 'INJECT_FILE',
+        selector: task.selector,
+        fileName: document.originalName,
+        mimeType: document.mimeType,
+        dataUrl,
+      },
+      { frameId: task.frameId },
+    ) as { success?: boolean; message?: string };
+    if (!response?.success) throw new Error(response?.message || 'The selected file could not be attached.');
+    await updateFileUploadTask(tabId, task.fieldId, { status: 'UPLOADED' });
+  } catch (error) {
+    await updateFileUploadTask(tabId, task.fieldId, {
+      status: 'ERROR',
+      error: error instanceof Error ? error.message : 'File upload failed.',
+    });
+  }
+}
+
+async function processFileUploadTasks(tabId: number, tasks: FileUploadTask[]): Promise<void> {
+  let documents: StoredDocument[];
+  try {
+    documents = await cloudLoadAllDocumentMetadata();
+  } catch (error) {
+    await Promise.all(tasks.map((task) => updateFileUploadTask(tabId, task.fieldId, {
+      status: 'ERROR',
+      error: error instanceof Error ? error.message : 'Could not load your document library.',
+    })));
+    return;
+  }
+
+  await Promise.all(tasks.map(async (task) => {
+    try {
+      const expectedType = await classifyDocumentField(task.label, task.accept ?? '');
+      if (!expectedType || expectedType === 'other') {
+        throw new Error('Could not identify the document type requested by this upload field.');
+      }
+
+      const document = selectDocumentForUpload(documents, expectedType);
+      if (!document) throw new Error(`No saved ${expectedType.replace(/_/g, ' ')} document was found.`);
+      await updateFileUploadTask(tabId, task.fieldId, {
+        expectedType,
+        documentId: document.id,
+        fileName: document.originalName,
+        status: 'MATCHED',
+        error: undefined,
+      });
+
+      if ((await getFileUploadState(tabId))?.autofillRequested) {
+        await uploadMatchedDocument(tabId, { ...task, expectedType, documentId: document.id, fileName: document.originalName, status: 'MATCHED' });
+      }
+    } catch (error) {
+      await updateFileUploadTask(tabId, task.fieldId, {
+        status: 'ERROR',
+        error: error instanceof Error ? error.message : 'Document matching failed.',
+      });
+    }
+  }));
+}
+
+async function runFileUploadPipeline(
+  tabId: number,
+  frameId: number,
+  url: string,
+  fields: PrescanResponse['scanResult']['fields'],
+): Promise<void> {
+  const uploadFields = fields.filter((field) => field.category === 'FILE_UPLOAD');
+  const tasks: FileUploadTask[] = uploadFields.map((field, index) => ({
+    fieldId: `file${index}`,
+    selector: field.selector,
+    frameId,
+    label: getFileFieldLabel(field),
+    accept: field.attributes.accept,
+    status: 'CLASSIFYING',
+  }));
+  await setFileUploadState({ tabId, url, autofillRequested: false, tasks });
+  if (tasks.length > 0) void processFileUploadTasks(tabId, tasks);
+}
+
+async function triggerFileUploads(tabId: number): Promise<void> {
+  const state = await getFileUploadState(tabId);
+  if (!state) return;
+  await setFileAutofillRequested(tabId, true);
+  const readyState = await getFileUploadState(tabId);
+  const matched = readyState?.tasks.filter((task) => task.status === 'MATCHED') ?? [];
+  await Promise.all(matched.map((task) => uploadMatchedDocument(tabId, task)));
+}
+
 async function triggerQuestionAutofill(tabId: number, profileMappingPending: boolean): Promise<void> {
   const state = await getQuestionState(tabId);
   if (!state) return;
@@ -278,7 +398,7 @@ async function fillLateProfileMappings(tabId: number, frameId: number): Promise<
   if (result?.status !== 'done' || !result.scanResult) return;
   await setQuestionAutofillRequested(tabId, true, false);
   const questionSelectors = new Set(result.scanResult.fields
-    .filter((field) => field.category === 'APPLICATION_QUESTION')
+    .filter((field) => field.category === 'APPLICATION_QUESTION' || field.category === 'FILE_UPLOAD')
     .map((field) => field.selector));
   const profileMappings = result.aiMappings.filter((mapping) => !questionSelectors.has(mapping.selector));
   if (profileMappings.length === 0) return;
@@ -384,6 +504,11 @@ async function runPrescanPipeline(tabId: number, googleFormsFrameId?: number): P
     const isGoogleForm = isGoogleFormsUrl(scanResult.url);
 
     await runQuestionPipeline(tabId, frameId, scanResult.url, scanResult.fields);
+    try {
+      await runFileUploadPipeline(tabId, frameId, scanResult.url, scanResult.fields);
+    } catch (error) {
+      console.warn(`[JobFill BG] Tab ${tabId}: file upload pipeline setup failed`, error);
+    }
     await setTabResult({
       tabId,
       scanResult,
@@ -399,7 +524,7 @@ async function runPrescanPipeline(tabId: number, googleFormsFrameId?: number): P
     if (cached && (!isGoogleForm || (cached.googleFormMappingVersion === GOOGLE_FORM_MAPPING_VERSION && cached.aiMappingComplete))) {
       console.log(`[JobFill BG] Tab ${tabId}: fingerprint cache HIT (${fingerprint.slice(0, 8)}...) — no AI needed`);
       const questionSelectors = new Set(scanResult.fields
-        .filter((field) => field.category === 'APPLICATION_QUESTION')
+        .filter((field) => field.category === 'APPLICATION_QUESTION' || field.category === 'FILE_UPLOAD')
         .map((field) => field.selector));
       const cachedAiMappings = cached.aiMappings.filter((mapping) => !questionSelectors.has(mapping.selector));
       await setTabResult({
@@ -599,6 +724,7 @@ export default defineBackground(() => {
     if (changeInfo.status === 'loading') {
       await clearTabResult(tabId);
       await clearQuestionState(tabId);
+      await clearFileUploadState(tabId);
       runningTabs.delete(tabId);
     }
   });
@@ -617,6 +743,12 @@ export default defineBackground(() => {
     if (message.type === 'TRIGGER_AUTOFILL') {
       const tabId = message.tabId;
       if (Number.isInteger(tabId)) void triggerQuestionAutofill(tabId, message.profileMappingPending === true);
+      return false;
+    }
+
+    if (message.type === 'TRIGGER_FILE_UPLOADS') {
+      const tabId = message.tabId;
+      if (Number.isInteger(tabId)) void triggerFileUploads(tabId);
       return false;
     }
 
@@ -656,7 +788,7 @@ export default defineBackground(() => {
       const tabId = sender.tab?.id;
       if (tabId == null || sender.frameId !== 0) return false;
 
-      void Promise.all([clearTabResult(tabId), clearQuestionState(tabId)]).then(async () => {
+      void Promise.all([clearTabResult(tabId), clearQuestionState(tabId), clearFileUploadState(tabId)]).then(async () => {
         await chrome.runtime.sendMessage({ type: 'FORM_STRUCTURE_UPDATED', tabId }).catch((err) => {
           console.warn(`[JobFill BG] Tab ${tabId}: popup update notification failed`, err);
         });
