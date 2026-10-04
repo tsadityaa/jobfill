@@ -59,6 +59,16 @@ export interface WaitForFormReadyResponse {
   ready: boolean;
 }
 
+export interface FormStructureChangedEvent {
+  type: 'FORM_STRUCTURE_CHANGED';
+  fingerprint: string;
+}
+
+export interface FormStructureUpdatedNotice {
+  type: 'FORM_STRUCTURE_UPDATED';
+  tabId: number;
+}
+
 export interface PrescanResponse {
   type: 'PRESCAN_RESULT';
   scanResult: ScanResult;
@@ -113,6 +123,8 @@ export interface SaveProfileResponse {
 // ---- Union Types ----
 
 export type ExtensionMessage =
+  | FormStructureChangedEvent
+  | FormStructureUpdatedNotice
   | ScanFieldsRequest
   | FillFieldsRequest
   | AIScanFieldsRequest

@@ -263,10 +263,9 @@ const FIELD_DICTIONARY: FieldPattern[] = [
 
 // ---- Core Detection Functions ----
 
-/**
- * Generate a unique CSS selector for an element.
- */
-function getUniqueSelector(el: Element): string {
+const SHADOW_SELECTOR_SEPARATOR = ' >>> ';
+
+function getLocalSelector(el: Element, root: Document | ShadowRoot): string {
   const tag = el.tagName.toLowerCase();
 
   // 1. Stable name attribute — most reliable on Adobe/Workday/Greenhouse React forms
@@ -276,7 +275,7 @@ function getUniqueSelector(el: Element): string {
   const name = (el as HTMLElement).getAttribute('name');
   if (name) {
     const escaped = CSS.escape(name);
-    const byTagAndName = document.querySelectorAll(`${tag}[name="${escaped}"]`);
+    const byTagAndName = root.querySelectorAll(`${tag}[name="${escaped}"]`);
     if (byTagAndName.length === 1) {
       // Unique on the page — perfectly stable selector
       return `${tag}[name="${escaped}"]`;
@@ -290,7 +289,7 @@ function getUniqueSelector(el: Element): string {
   const autocomplete = (el as HTMLElement).getAttribute('autocomplete');
   if (autocomplete && autocomplete !== 'off' && autocomplete !== 'on') {
     const escaped = CSS.escape(autocomplete);
-    const byAc = document.querySelectorAll(`${tag}[autocomplete="${escaped}"]`);
+    const byAc = root.querySelectorAll(`${tag}[autocomplete="${escaped}"]`);
     if (byAc.length === 1) return `${tag}[autocomplete="${escaped}"]`;
   }
 
@@ -306,14 +305,15 @@ function getUniqueSelector(el: Element): string {
       id.length > 40;                            // suspiciously long
 
     if (!looksGenerated) {
-      return `#${CSS.escape(id)}`;
+      const idSelector = `#${CSS.escape(id)}`;
+      if (root.querySelectorAll(idSelector).length === 1) return idSelector;
     }
   }
 
   // 4. Fallback — structural path from closest stable ancestor
   const path: string[] = [];
   let current: Element | null = el;
-  while (current && current !== document.body) {
+  while (current && current !== (root instanceof Document ? root.body : null)) {
     let selector = current.tagName.toLowerCase();
 
     // Anchor to a stable id or name on any ancestor
@@ -354,14 +354,60 @@ function getUniqueSelector(el: Element): string {
 }
 
 /**
+ * Generate a unique CSS selector for an element, including open shadow roots.
+ */
+function getUniqueSelector(el: Element): string {
+  const root = el.getRootNode();
+  if (root instanceof ShadowRoot) {
+    return `${getUniqueSelector(root.host)}${SHADOW_SELECTOR_SEPARATOR}${getLocalSelector(el, root)}`;
+  }
+  return getLocalSelector(el, document);
+}
+
+export function getElementBySelector(selector: string): Element | null {
+  const segments = selector.split(SHADOW_SELECTOR_SEPARATOR);
+  let root: Document | ShadowRoot = document;
+  let element: Element | null = null;
+
+  for (let index = 0; index < segments.length; index++) {
+    element = root.querySelector(segments[index]);
+    if (!element) return null;
+    if (index < segments.length - 1) {
+      if (!element.shadowRoot) return null;
+      root = element.shadowRoot;
+    }
+  }
+
+  return element;
+}
+
+export function queryAcrossOpenShadowRoots<T extends Element>(selector: string): T[] {
+  const results: T[] = [];
+  const roots: Array<Document | ShadowRoot> = [document];
+
+  while (roots.length > 0) {
+    const root = roots.pop()!;
+    results.push(...Array.from(root.querySelectorAll<T>(selector)));
+    for (const element of root.querySelectorAll('*')) {
+      if (element.shadowRoot) roots.push(element.shadowRoot);
+    }
+  }
+
+  return results;
+}
+
+/**
  * Get the label text associated with a form element.
  * Handles standard labels, aria attributes, AND non-standard patterns
  * like Google Forms (where labels are divs/spans in ancestor containers).
  */
-function getLabelText(el: HTMLElement): string | undefined {
+export function getLabelText(el: HTMLElement): string | undefined {
+  const root = el.getRootNode();
+  const queryRoot = root instanceof ShadowRoot ? root : document;
+
   // 1. Check for <label for="...">
   if (el.id) {
-    const label = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+    const label = queryRoot.querySelector(`label[for="${CSS.escape(el.id)}"]`);
     if (label) return label.textContent?.trim();
   }
 
@@ -378,7 +424,7 @@ function getLabelText(el: HTMLElement): string | undefined {
   // 3. Check aria-labelledby
   const labelledBy = el.getAttribute('aria-labelledby');
   if (labelledBy) {
-    const labelEl = document.getElementById(labelledBy);
+    const labelEl = queryRoot.querySelector(`#${CSS.escape(labelledBy)}`);
     if (labelEl) return labelEl.textContent?.trim();
   }
 
@@ -397,6 +443,7 @@ function getLabelText(el: HTMLElement): string | undefined {
   //    This handles Google Forms, Typeform, custom React forms, etc.
   //    where the label is in a sibling/cousin div, not a <label> tag.
   let ancestor: HTMLElement | null = el.parentElement;
+  if (!ancestor && root instanceof ShadowRoot) ancestor = root.host as HTMLElement;
   let depth = 0;
   while (ancestor && depth < 6) {
     // Look for text-bearing elements before the input within this ancestor
@@ -415,7 +462,9 @@ function getLabelText(el: HTMLElement): string | undefined {
         }
       }
     }
-    ancestor = ancestor.parentElement;
+    const ancestorRoot = ancestor.getRootNode();
+    ancestor = ancestor.parentElement
+      ?? (ancestorRoot instanceof ShadowRoot ? ancestorRoot.host as HTMLElement : null);
     depth++;
   }
 
@@ -494,7 +543,7 @@ export function scanPageFields(): DetectedField[] {
     if (w < 200 || h < 100) return [];
   }
 
-  const elements = document.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>(FILLABLE_FIELDS_SELECTOR);
+  const elements = queryAcrossOpenShadowRoots<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>(FILLABLE_FIELDS_SELECTOR);
 
   const detected: DetectedField[] = [];
 
@@ -559,8 +608,8 @@ const FILLABLE_FIELDS_SELECTOR =
 
 export function hasVisibleFormFields(): boolean {
   if (window.self !== window.top && (window.innerWidth < 200 || window.innerHeight < 100)) return false;
-  const elements = document.querySelectorAll<HTMLElement>(FILLABLE_FIELDS_SELECTOR);
-  return Array.from(elements).some(isRenderedField);
+  const elements = queryAcrossOpenShadowRoots<HTMLElement>(FILLABLE_FIELDS_SELECTOR);
+  return elements.some(isRenderedField);
 }
 
 // ---- AI Layer: Sanitized Field Extraction ----
@@ -592,7 +641,7 @@ export function extractSanitizedFields(): {
     if (w < 200 || h < 100) return { sanitizedFields: [], selectorLookup: {} };
   }
 
-  const elements = document.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>(
+  const elements = queryAcrossOpenShadowRoots<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>(
     'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"]):not([type="file"]), select, textarea',
   );
 

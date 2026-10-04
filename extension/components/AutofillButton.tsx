@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import ScanLoader from './ScanLoader';
 import type { UserProfile } from '../types/profile';
 import type { ScanResult, AutofillResult, FieldMapping } from '../types/autofill';
@@ -6,7 +6,7 @@ import type { ScanFieldsResponse, FillFieldsResponse, AIScanFieldsResponse } fro
 import type { SanitizedField, FieldIdLookup } from '../types/aiMapper';
 import { createFieldMappings, resolveProfileValue } from '../utils/fieldMapper';
 import { mapFieldsWithAI } from '../utils/aiMapper';
-import { getTabResult, clearTabResult } from '../utils/mappingCache';
+import { getTabResult, clearTabResult, GOOGLE_FORM_MAPPING_VERSION } from '../utils/mappingCache';
 
 interface AutofillButtonProps {
   profile: UserProfile;
@@ -31,22 +31,25 @@ async function sendToAllFrames<T>(
   tabId: number,
   message: unknown,
 ): Promise<T[]> {
+  const results: T[] = [];
   // Step 1: Try main frame first (frameId 0)
   try {
     const mainResponse = await chrome.tabs.sendMessage(tabId, message, { frameId: 0 });
     if (mainResponse) {
-      // If this is a SCAN_FIELDS response, check whether it actually has fields.
-      // If it does, return it alone — no need to touch sub-frames.
-      const scan = mainResponse as { type?: string; result?: { totalFields?: number } };
-      if (scan?.type === 'SCAN_FIELDS_RESULT') {
-        if ((scan.result?.totalFields ?? 0) > 0) {
-          console.log(`[Autofill] Main frame has ${scan.result!.totalFields} fields — using main frame only`);
-          return [mainResponse as T];
-        }
-        // Main frame has 0 fields — fall through to sub-frame scan
-        console.log('[Autofill] Main frame has 0 fields — scanning sub-frames');
+      const response = mainResponse as {
+        type?: string;
+        result?: { totalFields?: number; filledFields?: number };
+        sanitizedFields?: unknown[];
+      };
+      if (response.type === 'SCAN_FIELDS_RESULT') {
+        if ((response.result?.totalFields ?? 0) > 0) return [mainResponse as T];
+        console.log('[Autofill] Main frame has no fields — scanning sub-frames');
+      } else if (response.type === 'AI_SCAN_FIELDS_RESULT') {
+        if ((response.sanitizedFields?.length ?? 0) > 0) return [mainResponse as T];
+        console.log('[Autofill] Main frame has no AI fields — scanning sub-frames');
+      } else if (response.type === 'FILL_FIELDS_RESULT') {
+        if ((response.result?.filledFields ?? 0) > 0) return [mainResponse as T];
       } else {
-        // Non-scan message (AI_SCAN_FIELDS, FILL_FIELDS etc.) — main frame is always correct
         return [mainResponse as T];
       }
     }
@@ -56,7 +59,6 @@ async function sendToAllFrames<T>(
   }
 
   // Step 2: Fan out to sub-frames (only reached when main frame has 0 fields)
-  const results: T[] = [];
   if (chrome.webNavigation?.getAllFrames) {
     try {
       const frames = await chrome.webNavigation.getAllFrames({ tabId });
@@ -66,7 +68,19 @@ async function sendToAllFrames<T>(
         const promises = subFrames.map(async (frame) => {
           try {
             const response = await chrome.tabs.sendMessage(tabId, message, { frameId: frame.frameId });
-            if (response) results.push(response as T);
+            if (!response) return;
+            const frameResponse = response as {
+              type?: string;
+              result?: { totalFields?: number; filledFields?: number };
+              sanitizedFields?: unknown[];
+            };
+            if (
+              (frameResponse.type === 'SCAN_FIELDS_RESULT' && (frameResponse.result?.totalFields ?? 0) > 0)
+              || (frameResponse.type === 'AI_SCAN_FIELDS_RESULT' && (frameResponse.sanitizedFields?.length ?? 0) > 0)
+              || (frameResponse.type === 'FILL_FIELDS_RESULT' && (frameResponse.result?.filledFields ?? 0) > 0)
+            ) {
+              results.push(response as T);
+            }
           } catch { /* frame has no content script */ }
         });
         await Promise.all(promises);
@@ -89,16 +103,6 @@ async function sendToAllFrames<T>(
   return results;
 }
 
-async function sendToMainFrame<T>(tabId: number, message: unknown): Promise<T[]> {
-  try {
-    const response = await chrome.tabs.sendMessage(tabId, message, { frameId: 0 });
-    return response ? [response as T] : [];
-  } catch (err) {
-    console.error('[Autofill] Main frame is not reachable:', err);
-    return [];
-  }
-}
-
 export default function AutofillButton({ profile }: AutofillButtonProps) {
   const [state, setState] = useState<AutofillState>('idle');
   const [scanResult, setScanResult] = useState<ScanResult | null>(null);
@@ -106,6 +110,27 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
   const [error, setError] = useState<string | null>(null);
   const [aiMappedCount, setAiMappedCount] = useState(0);
   const [aiMappings, setAiMappings] = useState<FieldMapping[]>([]);
+
+  useEffect(() => {
+    const handleFormStructureUpdated = (message: unknown) => {
+      if (!message || typeof message !== 'object') return;
+      const notice = message as { type?: string; tabId?: number };
+      if (notice.type !== 'FORM_STRUCTURE_UPDATED') return;
+
+      void chrome.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
+        if (tab?.id !== notice.tabId) return;
+        setState('idle');
+        setScanResult(null);
+        setFillResult(null);
+        setError(null);
+        setAiMappedCount(0);
+        setAiMappings([]);
+      });
+    };
+
+    chrome.runtime.onMessage.addListener(handleFormStructureUpdated);
+    return () => chrome.runtime.onMessage.removeListener(handleFormStructureUpdated);
+  }, []);
 
   const handleScan = async () => {
     setState('scanning');
@@ -136,6 +161,25 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
 
       let cached = await getTabResult(tab.id);
 
+      let isGoogleFormsTab = /^https:\/\/docs\.google\.com\/forms\//i.test(tab.url ?? '')
+        || /^https:\/\/docs\.google\.com\/forms\//i.test(cached?.scanResult?.url ?? '');
+      if (!isGoogleFormsTab && /^https:\/\/sites\.google\.com\//i.test(tab.url ?? '')) {
+        try {
+          const frames = await chrome.webNavigation.getAllFrames({ tabId: tab.id });
+          isGoogleFormsTab = (frames ?? []).some((frame) => /^https:\/\/docs\.google\.com\/forms\//i.test(frame.url));
+        } catch {
+          // The normal scan path remains available if frame metadata is unavailable.
+        }
+      }
+      if (
+        isGoogleFormsTab
+        && cached
+        && cached.googleFormMappingVersion !== GOOGLE_FORM_MAPPING_VERSION
+      ) {
+        await clearTabResult(tab.id);
+        cached = null;
+      }
+
       if (cached === null || cached.status === 'running') {
         console.log('[AutofillButton] Requesting background pre-scan and waiting for completion...');
         await chrome.runtime.sendMessage({ type: 'REQUEST_PRESCAN', tabId: tab.id });
@@ -143,8 +187,14 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
         cached = await waitForCache(30000);
       }
 
-      if (cached?.status === 'done' && cached.scanResult) {
-        const mappingsBySelector = new Map(cached.aiMappings.map((mapping) => [mapping.selector, mapping]));
+      if (cached?.status === 'done' && cached.scanResult && cached.scanResult.totalFields > 0) {
+        const resolvedCachedMappings = cached.aiMappings
+          .map((mapping) => ({
+            ...mapping,
+            value: mapping.value || resolveProfileValue(profile, mapping.profileField) || '',
+          }))
+          .filter((mapping) => mapping.value.length > 0);
+        const mappingsBySelector = new Map(resolvedCachedMappings.map((mapping) => [mapping.selector, mapping]));
         const fields = cached.scanResult.fields.map((field) => {
           const mapping = mappingsBySelector.get(field.selector);
           return mapping
@@ -158,17 +208,17 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
           unknownFields: fields.filter((field) => field.category === 'UNKNOWN').length,
         };
 
-        if (cached.aiMappings.length > 0 || cachedScanResult.unknownFields === 0) {
+        if (cached.aiMappingComplete || cached.aiMappings.length > 0 || cachedScanResult.unknownFields === 0) {
           console.log('[AutofillButton] Using completed pre-scan result');
           setScanResult(cachedScanResult);
-          setAiMappings(cached.aiMappings);
-          setAiMappedCount(cached.aiMappedCount);
+          setAiMappings(resolvedCachedMappings);
+          setAiMappedCount(resolvedCachedMappings.length);
           setState('scanned');
           chrome.runtime.sendMessage({ type: 'UPDATE_BADGE', count: cachedScanResult.mappedFields });
           return;
         }
 
-        console.log('[AutofillButton] Cached scan has unmapped fields — retrying AI mapping');
+        console.log('[AutofillButton] Cached scan has no completed AI pass — retrying mapping');
       }
 
       setState('scanning');
@@ -177,13 +227,13 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
       console.log('[AutofillButton] No cache — running full scan pipeline');
 
       // Step 1: Regex scan the main frame (Layer 1+2)
-      const scanResponses = await sendToMainFrame<ScanFieldsResponse>(
+      const scanResponses = await sendToAllFrames<ScanFieldsResponse>(
         tab.id,
         { type: 'SCAN_FIELDS' },
       );
 
       // Merge results from all frames
-      const validResponses = scanResponses.filter((r) => r?.type === 'SCAN_FIELDS_RESULT');
+      const validResponses = scanResponses.filter((r) => r?.type === 'SCAN_FIELDS_RESULT' && r.result.totalFields > 0);
 
       if (validResponses.length === 0) {
         throw new Error('No form fields found. Try refreshing the page.');
@@ -215,7 +265,7 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
 
         try {
           // Get sanitized fields from the main frame
-          const aiScanResponses = await sendToMainFrame<AIScanFieldsResponse>(
+          const aiScanResponses = await sendToAllFrames<AIScanFieldsResponse>(
             tab.id,
             { type: 'AI_SCAN_FIELDS' },
           );
@@ -333,20 +383,29 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       if (!tab?.id) throw new Error('No active tab found');
 
-      // Send fill command to ALL frames
-      await sendToAllFrames<FillFieldsResponse>(
+      // Send fill command to the main frame and any subframe holding the form.
+      const fillResponses = await sendToAllFrames<FillFieldsResponse>(
         tab.id,
         { type: 'FILL_FIELDS', mappings: combinedMappings },
       );
+      const filledFields = fillResponses.reduce(
+        (total, response) => total + (response?.result?.filledFields ?? 0),
+        0,
+      );
 
-      // Since fields may be spread across frames, show success with total count
+      if (filledFields === 0) {
+        setError('No fields were filled. The form may be inside a frame that is not available to the extension.');
+        setState('error');
+        return;
+      }
+
       setFillResult({
         totalFields: combinedMappings.length,
-        filledFields: combinedMappings.length,
+        filledFields,
         skippedSensitive: 0,
         skippedUnknown: 0,
         skippedExisting: 0,
-        errors: 0,
+        errors: Math.max(0, combinedMappings.length - filledFields),
         fields: [],
       });
       setState('filled');

@@ -40,6 +40,10 @@ export function resolveProfileValue(
       return getPrimary(profile.phones)?.value;
     case 'emails.primary':
       return getPrimary(profile.emails)?.value;
+    case 'emails.personal':
+      return profile.emails.find((email) => email.label === 'Personal')?.value;
+    case 'emails.university':
+      return profile.emails.find((email) => email.label === 'University')?.value;
 
     // Address
     case 'addresses.primary.line1':
@@ -48,6 +52,11 @@ export function resolveProfileValue(
       return getPrimary(profile.addresses)?.line2;
     case 'addresses.primary.city':
       return getPrimary(profile.addresses)?.city;
+    case 'addresses.primary.cityState': {
+      const address = getPrimary(profile.addresses);
+      const cityState = [address?.city, address?.state].filter(Boolean).join(', ');
+      return cityState || undefined;
+    }
     case 'addresses.primary.state':
       return getPrimary(profile.addresses)?.state;
     case 'addresses.primary.postalCode':
@@ -65,6 +74,8 @@ export function resolveProfileValue(
     // Education
     case 'education.latest.institution':
       return profile.education[0]?.institution;
+    case 'education.latest.registrationNo':
+      return profile.education.find((education) => education.registrationNo)?.registrationNo;
     case 'education.latest.degree':
       return profile.education[0]?.degree;
     case 'education.latest.field':

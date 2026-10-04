@@ -12,12 +12,46 @@
 //   5. Popup click → reads cache → instant result
 // ============================================================
 
+/// <reference types="chrome" />
+
 import { hasVisibleFormFields, scanPageFields, extractSanitizedFields } from '../utils/fieldDetector';
 import { fillFields } from '../utils/formFiller';
 import { detectJobPage } from '../utils/jobPageDetector';
 import { computeFormFingerprint } from '../utils/formFingerprint';
 import type { ContentScriptRequest, ScanFieldsResponse, FillFieldsResponse, AIScanFieldsResponse, InjectFileResponse, DetectJobPageResponse, WaitForFormReadyResponse, PrescanResponse } from '../types/messages';
 import type { ScanResult } from '../types/autofill';
+
+let lastPrescannedFingerprint: string | null = null;
+
+function observeFormStructureChanges(): void {
+  if (window.self !== window.top || !document.documentElement) return;
+
+  let debounceTimer: ReturnType<typeof setTimeout> | undefined;
+  let revision = 0;
+  const observer = new MutationObserver(() => {
+    if (!lastPrescannedFingerprint) return;
+    revision++;
+    const observedRevision = revision;
+    if (debounceTimer) clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(async () => {
+      const fingerprint = await computeFormFingerprint();
+      if (observedRevision !== revision || fingerprint === lastPrescannedFingerprint) return;
+
+      lastPrescannedFingerprint = fingerprint;
+      chrome.runtime.sendMessage({ type: 'FORM_STRUCTURE_CHANGED', fingerprint }).catch((err) => {
+        console.warn('[JobFill] Failed to notify background about a changed form:', err);
+      });
+    }, 700);
+  });
+
+  observer.observe(document.documentElement, {
+    subtree: true,
+    childList: true,
+    characterData: true,
+    attributes: true,
+    attributeFilter: ['id', 'name', 'type', 'class', 'style', 'hidden', 'aria-label', 'aria-labelledby', 'placeholder'],
+  });
+}
 
 function injectFile(fileName: string, mimeType: string, dataUrl: string): boolean {
   const fileInputs = document.querySelectorAll<HTMLInputElement>('input[type="file"]');
@@ -147,9 +181,13 @@ function waitForFormReady(timeoutMs = 20000): Promise<WaitForFormReadyResponse> 
 export default defineContentScript({
   matches: ['<all_urls>'],
   allFrames: true,
+  matchAboutBlank: true,
+  matchOriginAsFallback: true,
   runAt: 'document_idle',
 
   main() {
+    observeFormStructureChanges();
+
     // Listen for messages from popup or background
     chrome.runtime.onMessage.addListener(
       (
@@ -210,6 +248,7 @@ export default defineContentScript({
 
             // Fingerprint is async (WebCrypto SHA-256) — use async response
             computeFormFingerprint().then((fingerprint) => {
+              lastPrescannedFingerprint = fingerprint;
               console.log(`[JobFill] Pre-scan complete. ${fields.length} fields, fingerprint: ${fingerprint.slice(0, 8)}...`);
               sendResponse({
                 type: 'PRESCAN_RESULT',

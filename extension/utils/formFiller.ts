@@ -6,7 +6,7 @@
 // ============================================================
 
 import type { FieldMapping, AutofillResult, AutofillFieldResult } from '../types/autofill';
-import { scanPageFields } from './fieldDetector';
+import { getElementBySelector, scanPageFields } from './fieldDetector';
 
 /**
  * Find the React fiber key on a DOM node (differs across React versions).
@@ -82,8 +82,8 @@ function dispatchInputEvents(el: HTMLInputElement | HTMLTextAreaElement | HTMLSe
   }
 
   // Also fire DOM events for Angular/Vue/non-React forms
-  el.dispatchEvent(new Event('input',  { bubbles: true }));
-  el.dispatchEvent(new Event('change', { bubbles: true }));
+  el.dispatchEvent(new Event('input',  { bubbles: true, composed: true }));
+  el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
 
   if (!skipBlur) {
     el.dispatchEvent(new FocusEvent('blur',     { bubbles: true }));
@@ -323,7 +323,7 @@ export function fillFields(mappings: FieldMapping[]): AutofillResult {
 
   for (const mapping of mappings) {
     try {
-      const el = document.querySelector(mapping.selector);
+      const el = getElementBySelector(mapping.selector);
       if (!el) {
         results.push({ selector: mapping.selector, profileField: mapping.profileField, status: 'error', message: 'Element not found' });
         errorCount++;
@@ -401,7 +401,7 @@ export function fillFields(mappings: FieldMapping[]): AutofillResult {
       // Their options may have changed (e.g., State dropdown switched from
       // US states to Indian states after Country changed to India).
       for (const mapping of mappings) {
-        const el = document.querySelector(mapping.selector);
+        const el = getElementBySelector(mapping.selector);
         if (!el || !(el instanceof HTMLSelectElement)) continue;
         // Skip if value already matches — it was filled successfully
         const currentText = el.options[el.selectedIndex]?.textContent?.trim().toLowerCase() ?? '';
@@ -434,7 +434,7 @@ export function fillFields(mappings: FieldMapping[]): AutofillResult {
         const value = valueByProfile[field.profileField];
         if (!value) continue;
 
-        const el = document.querySelector(field.selector);
+        const el = getElementBySelector(field.selector);
         if (!el) continue;
         if (
           !(el instanceof HTMLInputElement ||

@@ -19,11 +19,14 @@ import type { ScanResult, FieldMapping } from '../types/autofill';
 const CACHE_KEY = 'jf_map_cache';
 const TAB_RESULT_KEY = 'jf_tab_results';
 const MAX_CACHE_ENTRIES = 50; // keep storage bounded
+export const GOOGLE_FORM_MAPPING_VERSION = 9;
 
 export interface CachedMapping {
   fingerprint: string;
   aiMappings: FieldMapping[];
   aiMappedCount: number;
+  googleFormMappingVersion?: number;
+  aiMappingComplete?: boolean;
   /** ISO timestamp for TTL — mappings expire after 30 days */
   cachedAt: string;
 }
@@ -34,6 +37,10 @@ export interface TabPrescanResult {
   scanResult: ScanResult | null;
   aiMappings: FieldMapping[];
   aiMappedCount: number;
+  /** True when background AI mapping finished, even if it found no usable mappings. */
+  aiMappingComplete?: boolean;
+  /** Bump when Google Forms pre-scan/mapping behavior changes. */
+  googleFormMappingVersion?: number;
   /** 'running' | 'done' | 'error' | 'not_job' */
   status: 'running' | 'done' | 'error' | 'not_job';
   fingerprint: string | null;

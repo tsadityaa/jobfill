@@ -10,7 +10,7 @@ export default defineConfig({
     description: 'Your secure personal application assistant. Store details, autofill forms, manage documents.',
     version: '0.1.0',
     permissions: ['storage', 'unlimitedStorage', 'activeTab', 'scripting', 'webNavigation', 'identity'],
-    host_permissions: ['https://eneyoicwuqjdaonccqkm.supabase.co/*'],
+    host_permissions: ['<all_urls>', 'https://eneyoicwuqjdaonccqkm.supabase.co/*'],
     icons: {
       '16': 'icon-16.png',
       '32': 'icon-32.png',

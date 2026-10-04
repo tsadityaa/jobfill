@@ -33,6 +33,11 @@ export interface SanitizedField {
   options?: string[];
 }
 
+export interface GoogleFormLabelField {
+  fieldId: string;
+  label: string;
+}
+
 /**
  * Local-only lookup that maps opaque fieldIds back to real CSS selectors.
  * This NEVER leaves the browser.

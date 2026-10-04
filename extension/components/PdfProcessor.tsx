@@ -162,7 +162,7 @@ export default function PdfProcessor({ doc, onClose }: PdfProcessorProps) {
 
           {/* ===== OCR ===== */}
           {activeTab === 'ocr' && (
-            <OcrTab doc={doc} base={base} busy={busy} run={run} setBusy={setBusy} setStatus={setStatus} loadDocumentBlob={loadDocumentBlob} />
+            <OcrTab doc={doc} busy={busy} setBusy={setBusy} setStatus={setStatus} loadDocumentBlob={loadDocumentBlob} />
           )}
 
           {/* ===== INFO ===== */}
@@ -201,14 +201,17 @@ interface PreviewResult {
 
 interface TabProps {
   doc: StoredDocument;
-  base: string;
   busy: boolean;
-  run: (fn: () => Promise<void>) => Promise<void>;
-  processAndPreview: (op: (url: string) => Promise<string | string[]>, name: string, mime?: string) => Promise<void>;
   storeResult?: (blobs: Blob[], filenames: string[], mimeType: string) => void;
   setStatus?: (s: { type: 'success' | 'error' | 'info'; msg: string } | null) => void;
   setBusy?: (b: boolean) => void;
   loadDocumentBlob?: (id: string) => Promise<Blob>;
+}
+
+interface OperationTabProps extends TabProps {
+  base: string;
+  run: (fn: () => Promise<void>) => Promise<void>;
+  processAndPreview: (op: (url: string) => Promise<string | string[]>, name: string, mime?: string) => Promise<void>;
 }
 
 // ---- Module-level helpers ----
@@ -304,7 +307,7 @@ function ResultPreview({ result, setResult }: { result: PreviewResult; setResult
 }
 
 // ---- Compress ----
-function CompressTab({ doc, base, busy, run, processAndPreview }: TabProps) {
+function CompressTab({ doc, base, busy, run, processAndPreview }: OperationTabProps) {
   const [level, setLevel] = useState<'low' | 'medium' | 'high'>('medium');
   const isPdf = doc.mimeType === 'application/pdf';
 
@@ -347,7 +350,7 @@ function CompressTab({ doc, base, busy, run, processAndPreview }: TabProps) {
 }
 
 // ---- Convert ----
-function ConvertTab({ doc, base, busy, run, processAndPreview, setBusy, setStatus }: TabProps) {
+function ConvertTab({ doc, base, busy, run, processAndPreview, setBusy, setStatus }: OperationTabProps) {
   const [extractedText, setExtractedText] = useState('');
   const isPdf = doc.mimeType === 'application/pdf';
   const isWord = doc.mimeType.includes('word') || doc.mimeType.includes('officedocument');
@@ -451,7 +454,7 @@ function ConvertTab({ doc, base, busy, run, processAndPreview, setBusy, setStatu
 }
 
 // ---- Edit ----
-function EditTab({ doc, base, busy, run, processAndPreview, setStatus, storeResult }: TabProps) {
+function EditTab({ doc, base, busy, run, processAndPreview, setStatus, storeResult }: OperationTabProps) {
   const [splitPages, setSplitPages] = useState('');
   const [deletePages, setDeletePages] = useState('');
   const [rotateAngle, setRotateAngle] = useState<90 | 180 | 270>(90);
@@ -600,7 +603,7 @@ function EditTab({ doc, base, busy, run, processAndPreview, setStatus, storeResu
 }
 
 // ---- Protect ----
-function ProtectTab({ doc, base, busy, run, processAndPreview }: TabProps) {
+function ProtectTab({ doc, base, busy, run, processAndPreview }: OperationTabProps) {
   const [pwd, setPwd] = useState('');
   const [unlockPwd, setUnlockPwd] = useState('');
   const [show, setShow] = useState(false);

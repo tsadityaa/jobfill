@@ -1,6 +1,8 @@
 // ============================================================
 // Form Fingerprinter
 // ============================================================
+
+import { getLabelText, queryAcrossOpenShadowRoots } from './fieldDetector';
 // Creates a stable SHA-256 fingerprint from the STRUCTURE of a form
 // (hostname + field names + labels + types).
 // This is stronger than URL-based caching because:
@@ -18,7 +20,7 @@
 export async function computeFormFingerprint(): Promise<string> {
   const hostname = window.location.hostname;
 
-  const fields = document.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>(
+  const fields = queryAcrossOpenShadowRoots<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>(
     'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"]), select, textarea',
   );
 
@@ -33,13 +35,12 @@ export async function computeFormFingerprint(): Promise<string> {
     const name = (el.getAttribute('name') || '').toLowerCase().trim();
     const id   = (el.id || '').toLowerCase().trim();
 
-    // Label text — check <label for>, aria-label, placeholder
-    const labelFor   = id ? document.querySelector(`label[for="${el.id}"]`)?.textContent?.toLowerCase().trim() ?? '' : '';
+    const label = (getLabelText(el)?.toLowerCase().trim() || '');
     const ariaLabel  = (el.getAttribute('aria-label') || '').toLowerCase().trim();
     const placeholder = (el.getAttribute('placeholder') || '').toLowerCase().trim();
 
     // Compose a field token from stable structural attributes only
-    const token = [tag, type, name, id, labelFor, ariaLabel, placeholder]
+    const token = [tag, type, name, id, label, ariaLabel, placeholder]
       .filter(Boolean)
       .join('|');
 
@@ -49,7 +50,18 @@ export async function computeFormFingerprint(): Promise<string> {
   // Sort so minor DOM ordering changes don't break the fingerprint
   descriptors.sort();
 
-  const raw = `${hostname}::${descriptors.join(';;')}`;
+  const headings = Array.from(document.querySelectorAll<HTMLElement>(
+    'h1, h2, h3, [role="heading"], [aria-current="step"]',
+  ))
+    .filter((el) => {
+      const style = getComputedStyle(el);
+      return style.display !== 'none' && style.visibility !== 'hidden' && el.getClientRects().length > 0;
+    })
+    .map((el) => el.textContent?.replace(/\s+/g, ' ').trim().toLowerCase().slice(0, 200) ?? '')
+    .filter(Boolean)
+    .sort();
+
+  const raw = `${hostname}::${headings.join(';;')}::${descriptors.join(';;')}`;
 
   // SHA-256 via WebCrypto — available in both content scripts and service workers
   const encoder = new TextEncoder();

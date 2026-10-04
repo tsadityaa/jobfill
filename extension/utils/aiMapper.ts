@@ -6,9 +6,9 @@
 // ZERO personal data ever leaves the browser.
 // ============================================================
 
-import type { SanitizedField, AIMappingResponse } from '../types/aiMapper';
 import type { ProfileFieldKey } from '../types/autofill';
 import { ALL_INTENT_KEYS } from '../types/aiMapper';
+import type { SanitizedField, GoogleFormLabelField, AIMappingResponse } from '../types/aiMapper';
 
 const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
 
@@ -36,12 +36,21 @@ Respond with ONLY valid JSON, no markdown, no explanation:
   }
 }`;
 
+export interface AIMapperOptions {
+  googleForm?: boolean;
+  allowedIntentKeys?: ProfileFieldKey[];
+  intentDescriptions?: Partial<Record<ProfileFieldKey, string>>;
+  timeoutMs?: number;
+}
+
+const GOOGLE_FORM_SYSTEM_PROMPT = `Classify each supplied unknown Google Forms field label against the supplied canonical profile intent keys and optional intent descriptions. Infer the best match from the label's meaning, including abbreviations and synonyms. Return only a supplied intent key or null for each fieldId. Return null when a label has no matching profile variable or asks for a preference, job choice, consent, upload, password, OTP, legal declaration, or demographic answer. Never invent values or return placeholder text. Respond only with JSON: {"mappings":{"f0":null}}.`;
 /**
  * Call the OpenRouter API to map sanitized fields to intent keys.
  * Returns only validated mappings (rejects hallucinated keys).
  */
 export async function mapFieldsWithAI(
-  fields: SanitizedField[],
+  fields: Array<SanitizedField | GoogleFormLabelField>,
+  options: AIMapperOptions = {},
 ): Promise<AIMappingResponse> {
   const apiKey = import.meta.env.VITE_OPENROUTER_API_KEY;
 
@@ -55,12 +64,15 @@ export async function mapFieldsWithAI(
 
   const userPrompt = JSON.stringify({
     fields,
-    intentKeys: ALL_INTENT_KEYS,
+    intentKeys: options.allowedIntentKeys ?? ALL_INTENT_KEYS,
+    ...(options.intentDescriptions ? { intentDescriptions: options.intentDescriptions } : {}),
   });
+
+  const allowedIntentKeys = options.allowedIntentKeys ?? ALL_INTENT_KEYS;
 
   try {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 15000); // 15-second timeout
+    const timeoutId = setTimeout(() => controller.abort(), options.timeoutMs ?? 15000);
 
     const response = await fetch(OPENROUTER_API_URL, {
       method: 'POST',
@@ -74,7 +86,7 @@ export async function mapFieldsWithAI(
       body: JSON.stringify({
         model: model,
         messages: [
-          { role: 'system', content: SYSTEM_PROMPT },
+          { role: 'system', content: options.googleForm ? GOOGLE_FORM_SYSTEM_PROMPT : SYSTEM_PROMPT },
           { role: 'user', content: userPrompt }
         ],
         temperature: 0.1, // Low temperature for accuracy
@@ -82,15 +94,15 @@ export async function mapFieldsWithAI(
       }),
     });
 
-    clearTimeout(timeoutId);
-
     if (!response.ok) {
+      clearTimeout(timeoutId);
       const errorText = await response.text();
       console.error('[AI Mapper] API error:', response.status, errorText);
       return { mappings: {} };
     }
 
     const data = await response.json();
+    clearTimeout(timeoutId);
 
     // Extract text from OpenRouter response
     const text = data?.choices?.[0]?.message?.content;
@@ -106,7 +118,7 @@ export async function mapFieldsWithAI(
 
     // Validate: only keep mappings that reference real ProfileFieldKeys
     const validatedMappings: Record<string, ProfileFieldKey> = {};
-    const intentKeySet = new Set<string>(ALL_INTENT_KEYS);
+    const intentKeySet = new Set<string>(allowedIntentKeys);
 
     for (const [fieldId, intentKey] of Object.entries(rawMappings)) {
       if (intentKey && intentKeySet.has(intentKey)) {
