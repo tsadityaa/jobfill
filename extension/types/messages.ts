@@ -9,6 +9,7 @@ import type { UserProfile } from './profile';
 import type { ScanResult, AutofillResult, FieldMapping } from './autofill';
 import type { SanitizedField, FieldIdLookup } from './aiMapper';
 import type { JobPageClassification } from '../utils/jobPageDetector';
+import type { QuestionTask } from './questionTask';
 
 // ---- Request Messages (popup/background → content script) ----
 
@@ -40,6 +41,18 @@ export interface InjectFileRequest {
   fileName: string;
   mimeType: string;
   dataUrl: string;
+}
+
+export interface FillQuestionAnswerRequest {
+  type: 'FILL_QUESTION_ANSWER';
+  selector: string;
+  answer: string;
+}
+
+export interface SetQuestionPendingRequest {
+  type: 'SET_QUESTION_PENDING';
+  selectors: string[];
+  pending: boolean;
 }
 
 export interface AIScanFieldsRequest {
@@ -99,6 +112,11 @@ export interface InjectFileResponse {
   message: string;
 }
 
+export interface QuestionTasksResponse {
+  type: 'QUESTION_TASKS_RESULT';
+  tasks: QuestionTask[];
+}
+
 // ---- Profile Messages (popup ↔ background) ----
 
 export interface GetProfileRequest {
@@ -142,7 +160,10 @@ export type ExtensionMessage =
   | SaveProfileRequest
   | SaveProfileResponse
   | InjectFileRequest
-  | InjectFileResponse;
+  | InjectFileResponse
+  | FillQuestionAnswerRequest
+  | SetQuestionPendingRequest
+  | QuestionTasksResponse;
 
 export type ContentScriptRequest =
   | ScanFieldsRequest
@@ -151,7 +172,9 @@ export type ContentScriptRequest =
   | DetectJobPageRequest
   | WaitForFormReadyRequest
   | PrescanRequest
-  | InjectFileRequest;
+  | InjectFileRequest
+  | FillQuestionAnswerRequest
+  | SetQuestionPendingRequest;
 
 export type ContentScriptResponse =
   | ScanFieldsResponse

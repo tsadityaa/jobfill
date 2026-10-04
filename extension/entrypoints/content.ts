@@ -14,7 +14,7 @@
 
 /// <reference types="chrome" />
 
-import { hasVisibleFormFields, scanPageFields, extractSanitizedFields } from '../utils/fieldDetector';
+import { getElementBySelector, hasVisibleFormFields, scanPageFields, extractSanitizedFields } from '../utils/fieldDetector';
 import { fillFields } from '../utils/formFiller';
 import { detectJobPage } from '../utils/jobPageDetector';
 import { computeFormFingerprint } from '../utils/formFingerprint';
@@ -22,6 +22,53 @@ import type { ContentScriptRequest, ScanFieldsResponse, FillFieldsResponse, AISc
 import type { ScanResult } from '../types/autofill';
 
 let lastPrescannedFingerprint: string | null = null;
+const questionBorderOverlays = new Map<string, { target: HTMLElement; overlay: HTMLDivElement }>();
+
+function refreshQuestionBorderPositions(): void {
+  for (const [selector, item] of questionBorderOverlays) {
+    if (!item.target.isConnected) {
+      item.overlay.remove();
+      questionBorderOverlays.delete(selector);
+      continue;
+    }
+    const rect = item.target.getBoundingClientRect();
+    item.overlay.style.width = `${rect.width}px`;
+    item.overlay.style.height = `${rect.height}px`;
+    item.overlay.style.transform = `translate3d(${rect.left}px, ${rect.top}px, 0)`;
+    item.overlay.style.borderRadius = getComputedStyle(item.target).borderRadius;
+  }
+}
+
+window.addEventListener('scroll', refreshQuestionBorderPositions, true);
+window.addEventListener('resize', refreshQuestionBorderPositions);
+
+function setQuestionBorderPending(selector: string, pending: boolean): void {
+  const current = questionBorderOverlays.get(selector);
+  if (!pending) {
+    current?.overlay.remove();
+    questionBorderOverlays.delete(selector);
+    return;
+  }
+  if (current) return;
+
+  const target = getElementBySelector(selector);
+  if (!(target instanceof HTMLElement)) return;
+
+  const styleId = 'jobfill-question-border-style';
+  if (!document.getElementById(styleId)) {
+    const style = document.createElement('style');
+    style.id = styleId;
+    style.textContent = '@property --jobfill-question-angle { syntax: "<angle>"; inherits: false; initial-value: 0deg; } @keyframes jobfill-question-rotate { to { --jobfill-question-angle: 360deg; } } .jobfill-question-border { position: fixed; top: 0; left: 0; box-sizing: border-box; padding: 2px; z-index: 2147483646; pointer-events: none; background: conic-gradient(from var(--jobfill-question-angle), transparent 0deg 265deg, #168bff 300deg, #a9ddff 330deg, transparent 355deg); -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); mask-composite: exclude; animation: jobfill-question-rotate 1.1s linear infinite; }';
+    document.documentElement.appendChild(style);
+  }
+
+  const overlay = document.createElement('div');
+  overlay.className = 'jobfill-question-border';
+  overlay.setAttribute('aria-hidden', 'true');
+  document.documentElement.appendChild(overlay);
+  questionBorderOverlays.set(selector, { target, overlay });
+  refreshQuestionBorderPositions();
+}
 
 function observeFormStructureChanges(): void {
   if (window.self !== window.top || !document.documentElement) return;
@@ -193,7 +240,7 @@ export default defineContentScript({
       (
         message: ContentScriptRequest,
         _sender,
-        sendResponse: (response: ScanFieldsResponse | FillFieldsResponse | AIScanFieldsResponse | InjectFileResponse | DetectJobPageResponse | WaitForFormReadyResponse | PrescanResponse) => void,
+        sendResponse: (response: ScanFieldsResponse | FillFieldsResponse | AIScanFieldsResponse | InjectFileResponse | DetectJobPageResponse | WaitForFormReadyResponse | PrescanResponse | { type: 'QUESTION_ANSWER_FILLED'; success: boolean }) => void,
       ) => {
         switch (message.type) {
           case 'SCAN_FIELDS': {
@@ -265,6 +312,40 @@ export default defineContentScript({
           case 'FILL_FIELDS': {
             const fillResult = fillFields(message.mappings);
             sendResponse({ type: 'FILL_FIELDS_RESULT', result: fillResult });
+            break;
+          }
+
+          case 'SET_QUESTION_PENDING': {
+            for (const selector of message.selectors) setQuestionBorderPending(selector, message.pending);
+            sendResponse({ type: 'QUESTION_ANSWER_FILLED', success: true });
+            break;
+          }
+
+          case 'FILL_QUESTION_ANSWER': {
+            let success = false;
+            try {
+              const element = getElementBySelector(message.selector);
+              if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
+                if (element.value.trim()) {
+                  setQuestionBorderPending(message.selector, false);
+                  sendResponse({ type: 'QUESTION_ANSWER_FILLED', success: true });
+                  break;
+                }
+                const valueSetter = Object.getOwnPropertyDescriptor(
+                  element instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype,
+                  'value',
+                )?.set;
+                valueSetter?.call(element, message.answer);
+                element.dispatchEvent(new Event('input', { bubbles: true }));
+                element.dispatchEvent(new Event('change', { bubbles: true }));
+                element.dispatchEvent(new Event('blur', { bubbles: true }));
+                setQuestionBorderPending(message.selector, false);
+                success = true;
+              }
+            } catch {
+              success = false;
+            }
+            sendResponse({ type: 'QUESTION_ANSWER_FILLED', success });
             break;
           }
 

@@ -5,10 +5,11 @@
 /**
  * Category of a detected form field.
  * SAFE_AUTO — can be filled automatically from the profile.
+ * APPLICATION_QUESTION — free-response question handled by the answer pipeline.
  * USER_DECISION_REQUIRED — sensitive/legal question, must not auto-fill.
  * UNKNOWN — could not be mapped to any profile field.
  */
-export type FieldCategory = 'SAFE_AUTO' | 'USER_DECISION_REQUIRED' | 'UNKNOWN';
+export type FieldCategory = 'SAFE_AUTO' | 'APPLICATION_QUESTION' | 'USER_DECISION_REQUIRED' | 'UNKNOWN';
 
 /**
  * The profile field that a form input maps to.
@@ -67,6 +68,8 @@ export interface DetectedField {
     placeholder?: string;
     ariaLabel?: string;
     labelText?: string;
+    helpText?: string;
+    maxLength?: number;
   };
   /** Matched profile field key, if any */
   profileField: ProfileFieldKey | null;

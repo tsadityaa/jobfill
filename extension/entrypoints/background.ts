@@ -17,6 +17,11 @@ import { mapFieldsWithAI } from '../utils/aiMapper';
 import { ALL_INTENT_KEYS } from '../types/aiMapper';
 import { resolveProfileValue } from '../utils/fieldMapper';
 import { cloudGetProfile } from '../utils/cloudStorage';
+import { getCurrentUser } from '../utils/supabase';
+import { searchMemory } from '../utils/memory';
+import { formatProfileAnswerContext, generateApplicationAnswer } from '../utils/answerGenerator';
+import { detectApplicationQuestions } from '../utils/questionDetector';
+import { clearQuestionState, getQuestionState, setQuestionAutofillRequested, setQuestionState, updateQuestionTask } from '../utils/questionTaskStore';
 import {
   getCachedMapping,
   setCachedMapping,
@@ -29,6 +34,7 @@ import type { DetectJobPageResponse, PrescanResponse, WaitForFormReadyResponse }
 import type { FieldMapping } from '../types/autofill';
 import type { ProfileFieldKey } from '../types/autofill';
 import type { SanitizedField, FieldIdLookup, GoogleFormLabelField } from '../types/aiMapper';
+import type { QuestionTask } from '../types/questionTask';
 
 /** In-memory guard: prevent concurrent pre-scans for the same tab */
 const runningTabs = new Set<number>();
@@ -132,6 +138,164 @@ async function detectJobFrame(tabId: number): Promise<{ frameId: number; respons
   return null;
 }
 
+async function fillQuestionTask(tabId: number, task: QuestionTask): Promise<boolean> {
+  if (!task.answer) return false;
+  await updateQuestionTask(tabId, task.fieldId, { status: 'FILLING' });
+  try {
+    const result = await chrome.tabs.sendMessage(
+      tabId,
+      { type: 'FILL_QUESTION_ANSWER', selector: task.selector, answer: task.answer },
+      { frameId: task.frameId },
+    ) as { success?: boolean };
+    await updateQuestionTask(tabId, task.fieldId, { status: result?.success ? 'FILLED' : 'ERROR' });
+    if (!result?.success) {
+      await chrome.tabs.sendMessage(
+        tabId,
+        { type: 'SET_QUESTION_PENDING', selectors: [task.selector], pending: false },
+        { frameId: task.frameId },
+      ).catch(() => undefined);
+    }
+    return result?.success === true;
+  } catch (error) {
+    await updateQuestionTask(tabId, task.fieldId, {
+      status: 'ERROR',
+      error: error instanceof Error ? error.message : 'Could not reach the question field.',
+    });
+    await chrome.tabs.sendMessage(
+      tabId,
+      { type: 'SET_QUESTION_PENDING', selectors: [task.selector], pending: false },
+      { frameId: task.frameId },
+    ).catch(() => undefined);
+    return false;
+  }
+}
+
+async function runQuestionPipeline(tabId: number, frameId: number, url: string, fields: PrescanResponse['scanResult']['fields']): Promise<void> {
+  const detected = detectApplicationQuestions(fields);
+  const tasks: QuestionTask[] = detected.map(({ field }, index) => ({
+    fieldId: `q${index}`,
+    selector: field.selector,
+    frameId,
+    question: detected[index].question,
+    type: 'application_question',
+    status: 'RETRIEVING',
+  }));
+  const state = { tabId, url, frameId, autofillRequested: false, tasks };
+  await setQuestionState(state);
+  console.log(`[JobFill BG] Tab ${tabId}: detected ${tasks.length} application question fields`);
+  if (tasks.length === 0) return;
+
+  void processQuestionTasks(tabId, tasks);
+}
+
+async function processQuestionTasks(tabId: number, tasks: QuestionTask[]): Promise<void> {
+  let userId: string | null = null;
+  let profileContext = '';
+  try {
+    userId = (await getCurrentUser())?.id ?? null;
+  } catch (error) {
+    console.warn(`[JobFill BG] Tab ${tabId}: could not identify user for question memory retrieval`, error);
+  }
+  try {
+    profileContext = formatProfileAnswerContext(await cloudGetProfile());
+  } catch (error) {
+    console.warn(`[JobFill BG] Tab ${tabId}: could not load profile context for question answers`, error);
+  }
+
+  await Promise.all(tasks.map(async (task) => {
+    try {
+      const memories = userId ? await searchMemory(userId, task.question) : [];
+      await updateQuestionTask(tabId, task.fieldId, { status: 'GENERATING' });
+      const answer = await generateApplicationAnswer(task.question, memories, profileContext);
+      if (!answer) throw new Error('No grounded answer was available from saved memories.');
+      await updateQuestionTask(tabId, task.fieldId, { status: 'READY_TO_FILL', answer });
+
+      const currentState = await getQuestionState(tabId);
+      if (currentState?.autofillRequested) {
+        await fillQuestionTask(tabId, { ...task, answer, status: 'READY_TO_FILL' });
+      }
+    } catch (error) {
+      await updateQuestionTask(tabId, task.fieldId, {
+        status: 'ERROR',
+        error: error instanceof Error ? error.message : 'Question answer generation failed.',
+      });
+      await chrome.tabs.sendMessage(
+        tabId,
+        { type: 'SET_QUESTION_PENDING', selectors: [task.selector], pending: false },
+        { frameId: task.frameId },
+      ).catch(() => undefined);
+    }
+  }));
+}
+
+async function triggerQuestionAutofill(tabId: number, profileMappingPending: boolean): Promise<void> {
+  const state = await getQuestionState(tabId);
+  if (!state) return;
+  const retryTasks = state.tasks.filter((task) => task.status === 'ERROR');
+  const animating = state.tasks.filter((task) =>
+    ['RETRIEVING', 'GENERATING', 'READY_TO_FILL', 'ERROR'].includes(task.status),
+  );
+  const selectorsByFrame = new Map<number, string[]>();
+  for (const task of animating) {
+    const selectors = selectorsByFrame.get(task.frameId) ?? [];
+    selectors.push(task.selector);
+    selectorsByFrame.set(task.frameId, selectors);
+  }
+  for (const [frameId, selectors] of selectorsByFrame) {
+    await chrome.tabs.sendMessage(tabId, { type: 'SET_QUESTION_PENDING', selectors, pending: true }, { frameId }).catch(() => undefined);
+  }
+
+  await Promise.all(retryTasks.map((task) => updateQuestionTask(tabId, task.fieldId, {
+    status: 'RETRIEVING',
+    answer: undefined,
+    error: undefined,
+  })));
+
+  if (animating.some((task) => task.status === 'READY_TO_FILL')) {
+    await new Promise((resolve) => setTimeout(resolve, 120));
+  }
+
+  await setQuestionAutofillRequested(tabId, true, profileMappingPending);
+  const updatedState = await getQuestionState(tabId);
+  if (!updatedState) return;
+  if (profileMappingPending) void fillLateProfileMappings(tabId, updatedState.frameId);
+  const ready = updatedState.tasks.filter((task) => task.status === 'READY_TO_FILL' && task.answer);
+  await Promise.all(ready.map((task) => fillQuestionTask(tabId, task)));
+  if (retryTasks.length > 0) {
+    void processQuestionTasks(tabId, retryTasks.map((task) => ({
+      ...task,
+      status: 'RETRIEVING',
+      answer: undefined,
+      error: undefined,
+    })));
+  }
+}
+
+async function fillLateProfileMappings(tabId: number, frameId: number): Promise<void> {
+  const questionState = await getQuestionState(tabId);
+  if (!questionState?.autofillRequested || !questionState.profileMappingPending) return;
+  const result = await getTabResult(tabId);
+  if (result?.status !== 'done' || !result.scanResult) return;
+  await setQuestionAutofillRequested(tabId, true, false);
+  const questionSelectors = new Set(result.scanResult.fields
+    .filter((field) => field.category === 'APPLICATION_QUESTION')
+    .map((field) => field.selector));
+  const profileMappings = result.aiMappings.filter((mapping) => !questionSelectors.has(mapping.selector));
+  if (profileMappings.length === 0) return;
+
+  try {
+    const profile = await cloudGetProfile();
+    const mappings = profileMappings
+      .map((mapping) => ({ ...mapping, value: mapping.value || resolveProfileValue(profile, mapping.profileField) || '' }))
+      .filter((mapping) => mapping.value.length > 0);
+    if (mappings.length > 0) {
+      await chrome.tabs.sendMessage(tabId, { type: 'FILL_FIELDS', mappings }, { frameId });
+    }
+  } catch (error) {
+    console.warn(`[JobFill BG] Tab ${tabId}: late profile mapping fill failed`, error);
+  }
+}
+
 /**
  * Run the full pre-scan pipeline for a tab.
  * Errors are caught and stored as status:'error' — never crash the service worker.
@@ -219,20 +383,36 @@ async function runPrescanPipeline(tabId: number, googleFormsFrameId?: number): P
     const { scanResult, sanitizedFields, selectorLookup, fingerprint } = prescanResp;
     const isGoogleForm = isGoogleFormsUrl(scanResult.url);
 
+    await runQuestionPipeline(tabId, frameId, scanResult.url, scanResult.fields);
+    await setTabResult({
+      tabId,
+      scanResult,
+      aiMappings: [],
+      aiMappedCount: 0,
+      aiMappingComplete: false,
+      status: 'running',
+      fingerprint,
+    });
+
     // Step 3: Check fingerprint cache for AI mappings
     const cached = await getCachedMapping(fingerprint);
     if (cached && (!isGoogleForm || (cached.googleFormMappingVersion === GOOGLE_FORM_MAPPING_VERSION && cached.aiMappingComplete))) {
       console.log(`[JobFill BG] Tab ${tabId}: fingerprint cache HIT (${fingerprint.slice(0, 8)}...) — no AI needed`);
+      const questionSelectors = new Set(scanResult.fields
+        .filter((field) => field.category === 'APPLICATION_QUESTION')
+        .map((field) => field.selector));
+      const cachedAiMappings = cached.aiMappings.filter((mapping) => !questionSelectors.has(mapping.selector));
       await setTabResult({
         tabId,
         scanResult,
-        aiMappings: cached.aiMappings,
-        aiMappedCount: cached.aiMappedCount,
+        aiMappings: cachedAiMappings,
+        aiMappedCount: cachedAiMappings.length,
         aiMappingComplete: true,
         googleFormMappingVersion: isGoogleForm ? GOOGLE_FORM_MAPPING_VERSION : undefined,
         status: 'done',
         fingerprint,
       });
+      await fillLateProfileMappings(tabId, frameId);
       return;
     }
 
@@ -297,6 +477,7 @@ async function runPrescanPipeline(tabId: number, googleFormsFrameId?: number): P
         status: 'done',
         fingerprint,
       });
+      await fillLateProfileMappings(tabId, frameId);
       if (scanResult.mappedFields > 0) {
         chrome.action.setBadgeText({ text: String(scanResult.mappedFields), tabId });
         chrome.action.setBadgeBackgroundColor({ color: '#8b5cf6', tabId });
@@ -378,6 +559,7 @@ async function runPrescanPipeline(tabId: number, googleFormsFrameId?: number): P
 
     // Step 6: Store final result for popup pickup
     await setTabResult({ tabId, scanResult, aiMappings, aiMappedCount, aiMappingComplete: true, status: 'done', fingerprint });
+    await fillLateProfileMappings(tabId, frameId);
     console.log(`[JobFill BG] Tab ${tabId}: pre-scan complete. ${scanResult.mappedFields} fields ready.`);
 
     // Update badge
@@ -416,6 +598,7 @@ export default defineBackground(() => {
   chrome.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
     if (changeInfo.status === 'loading') {
       await clearTabResult(tabId);
+      await clearQuestionState(tabId);
       runningTabs.delete(tabId);
     }
   });
@@ -428,6 +611,12 @@ export default defineBackground(() => {
           if (!runningTabs.has(tabId)) void runPrescanPipeline(tabId, frameId ?? undefined);
         });
       }
+      return false;
+    }
+
+    if (message.type === 'TRIGGER_AUTOFILL') {
+      const tabId = message.tabId;
+      if (Number.isInteger(tabId)) void triggerQuestionAutofill(tabId, message.profileMappingPending === true);
       return false;
     }
 
@@ -467,7 +656,7 @@ export default defineBackground(() => {
       const tabId = sender.tab?.id;
       if (tabId == null || sender.frameId !== 0) return false;
 
-      void clearTabResult(tabId).then(async () => {
+      void Promise.all([clearTabResult(tabId), clearQuestionState(tabId)]).then(async () => {
         await chrome.runtime.sendMessage({ type: 'FORM_STRUCTURE_UPDATED', tabId }).catch((err) => {
           console.warn(`[JobFill BG] Tab ${tabId}: popup update notification failed`, err);
         });

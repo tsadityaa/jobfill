@@ -4,15 +4,17 @@ import type { UserProfile } from '../types/profile';
 import type { ScanResult, AutofillResult, FieldMapping } from '../types/autofill';
 import type { ScanFieldsResponse, FillFieldsResponse, AIScanFieldsResponse } from '../types/messages';
 import type { SanitizedField, FieldIdLookup } from '../types/aiMapper';
+import type { QuestionTask } from '../types/questionTask';
 import { createFieldMappings, resolveProfileValue } from '../utils/fieldMapper';
 import { mapFieldsWithAI } from '../utils/aiMapper';
 import { getTabResult, clearTabResult, GOOGLE_FORM_MAPPING_VERSION } from '../utils/mappingCache';
+import { getQuestionState } from '../utils/questionTaskStore';
 
 interface AutofillButtonProps {
   profile: UserProfile;
 }
 
-type AutofillState = 'idle' | 'scanning' | 'ai_mapping' | 'scanned' | 'filling' | 'filled' | 'error';
+type AutofillState = 'idle' | 'scanning' | 'filling' | 'filled' | 'error';
 
 /**
  * Send a message to the relevant frames in a tab and collect responses.
@@ -109,7 +111,33 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
   const [fillResult, setFillResult] = useState<AutofillResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [aiMappedCount, setAiMappedCount] = useState(0);
-  const [aiMappings, setAiMappings] = useState<FieldMapping[]>([]);
+  const [mappingPending, setMappingPending] = useState(false);
+  const [questionTasks, setQuestionTasks] = useState<QuestionTask[]>([]);
+  const [questionStateObserved, setQuestionStateObserved] = useState(false);
+  const [questionWatchTabId, setQuestionWatchTabId] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (questionWatchTabId === null) return;
+    let active = true;
+    let timeout: ReturnType<typeof setTimeout>;
+
+    const pollQuestionTasks = async () => {
+      const questionState = await getQuestionState(questionWatchTabId);
+      if (!active) return;
+      setQuestionStateObserved(Boolean(questionState));
+      const tasks = questionState?.tasks ?? [];
+      setQuestionTasks(tasks);
+      if (tasks.length > 0 && tasks.some((task) => task.status === 'RETRIEVING' || task.status === 'GENERATING' || task.status === 'FILLING' || task.status === 'READY_TO_FILL')) {
+        timeout = setTimeout(() => void pollQuestionTasks(), 300);
+      }
+    };
+
+    void pollQuestionTasks();
+    return () => {
+      active = false;
+      clearTimeout(timeout);
+    };
+  }, [questionWatchTabId]);
 
   useEffect(() => {
     const handleFormStructureUpdated = (message: unknown) => {
@@ -124,7 +152,10 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
         setFillResult(null);
         setError(null);
         setAiMappedCount(0);
-        setAiMappings([]);
+        setMappingPending(false);
+        setQuestionTasks([]);
+        setQuestionStateObserved(false);
+        setQuestionWatchTabId(null);
       });
     };
 
@@ -132,13 +163,78 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
     return () => chrome.runtime.onMessage.removeListener(handleFormStructureUpdated);
   }, []);
 
+  const fillPreparedWork = async (tabId: number, result: ScanResult, mappings: FieldMapping[], mappingIsPending: boolean) => {
+    setScanResult(result);
+    setAiMappedCount(mappings.length);
+    setMappingPending(mappingIsPending);
+    setQuestionTasks([]);
+    setQuestionStateObserved(false);
+    setQuestionWatchTabId(tabId);
+    setState('filling');
+
+    void chrome.runtime.sendMessage({ type: 'TRIGGER_AUTOFILL', tabId, profileMappingPending: mappingIsPending });
+    const regexMappings = createFieldMappings(result.fields, profile);
+    const regexSelectors = new Set(regexMappings.map((mapping) => mapping.selector));
+    const combinedMappings = [
+      ...regexMappings,
+      ...mappings.filter((mapping) => !regexSelectors.has(mapping.selector)),
+    ];
+    const fillResponses = combinedMappings.length > 0
+      ? await sendToAllFrames<FillFieldsResponse>(tabId, { type: 'FILL_FIELDS', mappings: combinedMappings })
+      : [];
+    const fillSummary = fillResponses.reduce((summary, response) => {
+      const result = response?.result;
+      if (!result) return summary;
+      return {
+        filledFields: summary.filledFields + result.filledFields,
+        skippedSensitive: summary.skippedSensitive + result.skippedSensitive,
+        skippedUnknown: summary.skippedUnknown + result.skippedUnknown,
+        skippedExisting: summary.skippedExisting + result.skippedExisting,
+        errors: summary.errors + result.errors,
+      };
+    }, { filledFields: 0, skippedSensitive: 0, skippedUnknown: 0, skippedExisting: 0, errors: 0 });
+
+    setFillResult({
+      totalFields: combinedMappings.length,
+      ...fillSummary,
+      fields: [],
+    });
+    setState('filled');
+    chrome.runtime.sendMessage({ type: 'UPDATE_BADGE', count: result.mappedFields });
+
+    if (mappingIsPending) {
+      void (async () => {
+        const deadline = Date.now() + 30000;
+        while (Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 300));
+          const latest = await getTabResult(tabId);
+          if (!latest || latest.status === 'error') break;
+          if (latest.status !== 'done') continue;
+          const resolved = latest.aiMappings
+            .map((mapping) => ({
+              ...mapping,
+              value: mapping.value || resolveProfileValue(profile, mapping.profileField) || '',
+            }))
+            .filter((mapping) => mapping.value.length > 0);
+          setAiMappedCount(resolved.length);
+          setScanResult(latest.scanResult ?? result);
+          break;
+        }
+        setMappingPending(false);
+      })();
+    }
+  };
+
   const handleScan = async () => {
     setState('scanning');
     setError(null);
     setScanResult(null);
     setFillResult(null);
     setAiMappedCount(0);
-    setAiMappings([]);
+    setMappingPending(false);
+    setQuestionTasks([]);
+    setQuestionStateObserved(false);
+    setQuestionWatchTabId(null);
 
     try {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -153,8 +249,8 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
         const deadline = Date.now() + maxMs;
         while (true) {
           const r = await getTabResult(tab.id!);
-          if (r && r.status !== 'running') return r;
-          if (!r && Date.now() >= deadline) return null;
+          if (r && (r.status !== 'running' || r.scanResult)) return r;
+          if (Date.now() >= deadline) return r;
           await new Promise((res) => setTimeout(res, 150));
         }
       };
@@ -181,14 +277,17 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
       }
 
       if (cached === null || cached.status === 'running') {
-        console.log('[AutofillButton] Requesting background pre-scan and waiting for completion...');
+        console.log('[AutofillButton] Requesting background pre-scan...');
         await chrome.runtime.sendMessage({ type: 'REQUEST_PRESCAN', tabId: tab.id });
-        setState('ai_mapping');
         cached = await waitForCache(30000);
       }
 
-      if (cached?.status === 'done' && cached.scanResult && cached.scanResult.totalFields > 0) {
+      if (cached?.scanResult && cached.scanResult.totalFields > 0) {
+        const questionSelectors = new Set(cached.scanResult.fields
+          .filter((field) => field.category === 'APPLICATION_QUESTION')
+          .map((field) => field.selector));
         const resolvedCachedMappings = cached.aiMappings
+          .filter((mapping) => !questionSelectors.has(mapping.selector))
           .map((mapping) => ({
             ...mapping,
             value: mapping.value || resolveProfileValue(profile, mapping.profileField) || '',
@@ -208,17 +307,11 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
           unknownFields: fields.filter((field) => field.category === 'UNKNOWN').length,
         };
 
-        if (cached.aiMappingComplete || cached.aiMappings.length > 0 || cachedScanResult.unknownFields === 0) {
-          console.log('[AutofillButton] Using completed pre-scan result');
-          setScanResult(cachedScanResult);
-          setAiMappings(resolvedCachedMappings);
-          setAiMappedCount(resolvedCachedMappings.length);
-          setState('scanned');
-          chrome.runtime.sendMessage({ type: 'UPDATE_BADGE', count: cachedScanResult.mappedFields });
-          return;
-        }
-
-        console.log('[AutofillButton] Cached scan has no completed AI pass — retrying mapping');
+        const mappingIsPending = cached.status === 'running'
+          && !cached.aiMappingComplete
+          && cachedScanResult.unknownFields > 0;
+        await fillPreparedWork(tab.id, cachedScanResult, resolvedCachedMappings, mappingIsPending);
+        return;
       }
 
       setState('scanning');
@@ -258,11 +351,10 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
       }
 
       const unknownFields = mergedResult.fields.filter((f) => f.category === 'UNKNOWN');
+      let resolvedAiMappings: FieldMapping[] = [];
 
       // Step 2: If there are UNKNOWN fields, try AI mapping (Layer 3)
       if (unknownFields.length > 0) {
-        setState('ai_mapping');
-
         try {
           // Get sanitized fields from the main frame
           const aiScanResponses = await sendToAllFrames<AIScanFieldsResponse>(
@@ -300,8 +392,6 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
             const aiResponse = await mapFieldsWithAI(unknownSanitized);
 
             // Convert AI mappings to FieldMappings using local vault data
-            const resolvedAiMappings: FieldMapping[] = [];
-
             for (const [fieldId, profileField] of Object.entries(aiResponse.mappings)) {
               const selector = allSelectorLookup[fieldId];
               if (!selector) continue;
@@ -326,7 +416,6 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
             }
 
             setAiMappedCount(resolvedAiMappings.length);
-            setAiMappings(resolvedAiMappings);
 
             // Recalculate counts
             mergedResult.mappedFields = mergedResult.fields.filter((f) => f.category === 'SAFE_AUTO').length;
@@ -338,14 +427,7 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
         }
       }
 
-      setScanResult(mergedResult);
-      setState('scanned');
-
-      // Update badge
-      chrome.runtime.sendMessage({
-        type: 'UPDATE_BADGE',
-        count: mergedResult.mappedFields,
-      });
+      await fillPreparedWork(tab.id, mergedResult, resolvedAiMappings, false);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unknown error';
       if (message.includes('Receiving end does not exist') || message.includes('Could not establish connection')) {
@@ -353,64 +435,6 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
       } else {
         setError(message);
       }
-      setState('error');
-    }
-  };
-
-  const handleFill = async () => {
-    if (!scanResult) return;
-
-    setState('filling');
-    setError(null);
-
-    try {
-      // Combine regex mappings + AI mappings
-      const regexMappings = createFieldMappings(scanResult.fields, profile);
-
-      // Merge: AI mappings for fields that regex couldn't handle
-      const regexSelectors = new Set(regexMappings.map((m) => m.selector));
-      const combinedMappings = [
-        ...regexMappings,
-        ...aiMappings.filter((m) => !regexSelectors.has(m.selector)),
-      ];
-
-      if (combinedMappings.length === 0) {
-        setError('No fields could be mapped to your profile data. Please fill in your profile first.');
-        setState('error');
-        return;
-      }
-
-      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-      if (!tab?.id) throw new Error('No active tab found');
-
-      // Send fill command to the main frame and any subframe holding the form.
-      const fillResponses = await sendToAllFrames<FillFieldsResponse>(
-        tab.id,
-        { type: 'FILL_FIELDS', mappings: combinedMappings },
-      );
-      const filledFields = fillResponses.reduce(
-        (total, response) => total + (response?.result?.filledFields ?? 0),
-        0,
-      );
-
-      if (filledFields === 0) {
-        setError('No fields were filled. The form may be inside a frame that is not available to the extension.');
-        setState('error');
-        return;
-      }
-
-      setFillResult({
-        totalFields: combinedMappings.length,
-        filledFields,
-        skippedSensitive: 0,
-        skippedUnknown: 0,
-        skippedExisting: 0,
-        errors: Math.max(0, combinedMappings.length - filledFields),
-        fields: [],
-      });
-      setState('filled');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unknown error');
       setState('error');
     }
   };
@@ -430,52 +454,35 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
     setFillResult(null);
     setError(null);
     setAiMappedCount(0);
-    setAiMappings([]);
+    setMappingPending(false);
+    setQuestionTasks([]);
+    setQuestionStateObserved(false);
+    setQuestionWatchTabId(null);
   };
 
   return (
     <div className="autofill-footer">
-      {/* Scan Results */}
-      {state === 'scanned' && scanResult && (
-        <div className="autofill-result animate-fade-in">
-          <div className="autofill-result-row">
-            <span className="label">Fields detected</span>
-            <span className="value">{scanResult.totalFields}</span>
-          </div>
-          <div className="autofill-result-row">
-            <span className="label">Can autofill</span>
-            <span className="value success">✓ {scanResult.mappedFields}</span>
-          </div>
-          {aiMappedCount > 0 && (
-            <div className="autofill-result-row">
-              <span className="label" style={{ paddingLeft: '8px', fontSize: '0.72rem' }}>
-                ↳ via AI
-              </span>
-              <span className="value" style={{ color: 'var(--color-pc-accent-start)', fontSize: '0.72rem' }}>
-                🧠 {aiMappedCount}
-              </span>
-            </div>
-          )}
-          {scanResult.sensitiveFields > 0 && (
-            <div className="autofill-result-row">
-              <span className="label">Needs your input</span>
-              <span className="value warning">⚠ {scanResult.sensitiveFields}</span>
-            </div>
-          )}
-          {scanResult.unknownFields > 0 && (
-            <div className="autofill-result-row">
-              <span className="label">Unrecognized</span>
-              <span className="value" style={{ color: 'var(--color-pc-text-muted)' }}>
-                {scanResult.unknownFields}
-              </span>
-            </div>
-          )}
-        </div>
-      )}
-
       {/* Fill Results */}
       {state === 'filled' && fillResult && (
         <div className="autofill-result animate-fade-in">
+          {scanResult && (
+            <>
+              <div className="autofill-result-row">
+                <span className="label">Fields detected</span>
+                <span className="value">{scanResult.totalFields}</span>
+              </div>
+              <div className="autofill-result-row">
+                <span className="label">Profile matches</span>
+                <span className="value success">{scanResult.mappedFields}</span>
+              </div>
+              {aiMappedCount > 0 && (
+                <div className="autofill-result-row">
+                  <span className="label">AI mapped</span>
+                  <span className="value" style={{ color: 'var(--color-pc-accent-start)' }}>{aiMappedCount}</span>
+                </div>
+              )}
+            </>
+          )}
           <div className="autofill-result-row">
             <span className="label">Fields filled</span>
             <span className="value success">✓ {fillResult.filledFields}</span>
@@ -493,6 +500,56 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
               <span className="label">Errors</span>
               <span className="value error">✗ {fillResult.errors}</span>
             </div>
+          )}
+        </div>
+      )}
+
+      {mappingPending && (
+        <div className="autofill-result animate-fade-in" aria-live="polite">
+          <div className="autofill-result-row">
+            <span className="label">AI mapping</span>
+            <span className="value" style={{ color: 'var(--color-pc-accent-start)' }}>
+              <span aria-hidden="true" style={{ display: 'inline-block', animation: 'spin 0.65s linear infinite' }}>⟳</span> Running
+            </span>
+          </div>
+        </div>
+      )}
+
+      {questionStateObserved && (
+        <div className="autofill-result animate-fade-in" aria-live="polite">
+          {questionTasks.length === 0 ? (
+            <div className="autofill-result-row">
+              <span className="label">Text answers</span>
+              <span className="value" style={{ color: 'var(--color-pc-text-muted)' }}>No question fields detected</span>
+            </div>
+          ) : (
+            <>
+              {questionTasks.some((task) => ['RETRIEVING', 'GENERATING', 'FILLING', 'READY_TO_FILL'].includes(task.status)) && (
+                <div className="autofill-result-row">
+                  <span className="label">Text answers</span>
+                  <span className="value" style={{ color: '#3b82f6' }}>
+                    <span aria-hidden="true" style={{ display: 'inline-block', animation: 'spin 0.65s linear infinite' }}>⟳</span> Working
+                  </span>
+                </div>
+              )}
+              {questionTasks.filter((task) => task.status === 'FILLED').length > 0 && (
+                <div className="autofill-result-row">
+                  <span className="label">Answers filled</span>
+                  <span className="value success">✓ {questionTasks.filter((task) => task.status === 'FILLED').length}</span>
+                </div>
+              )}
+              {questionTasks.some((task) => task.status === 'ERROR') && (
+                <div className="autofill-result-row">
+                  <span className="label">Answer issue</span>
+                  <span className="value error">{questionTasks.filter((task) => task.status === 'ERROR').length} unavailable</span>
+                </div>
+              )}
+              {questionTasks.find((task) => task.status === 'ERROR')?.error && (
+                <div style={{ fontSize: '0.72rem', color: 'var(--color-pc-error)', paddingTop: '4px' }}>
+                  {questionTasks.find((task) => task.status === 'ERROR')?.error}
+                </div>
+              )}
+            </>
           )}
         </div>
       )}
@@ -521,24 +578,6 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
       )}
 
       {state === 'scanning' && <ScanLoader mode="scanning" />}
-
-      {state === 'ai_mapping' && <ScanLoader mode="ai" />}
-
-      {state === 'scanned' && (
-        <div style={{ display: 'flex', gap: '8px' }}>
-          <button
-            id="btn-autofill-fill"
-            className="btn btn-primary"
-            onClick={handleFill}
-            style={{ flex: 1 }}
-          >
-            ⚡ Autofill {scanResult?.mappedFields} Fields
-          </button>
-          <button className="btn btn-secondary" onClick={handleReset}>
-            ✗
-          </button>
-        </div>
-      )}
 
       {state === 'filling' && <ScanLoader mode="filling" />}
 

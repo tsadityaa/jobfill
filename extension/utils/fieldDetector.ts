@@ -8,6 +8,7 @@
 
 import type { DetectedField, ProfileFieldKey, FieldCategory } from '../types/autofill';
 import { isSensitiveField } from './sensitiveFields';
+import { isApplicationQuestionCandidate } from './questionDetector';
 
 // ---- Layer 2: Known dictionary ----
 
@@ -26,7 +27,7 @@ const FIELD_DICTIONARY: FieldPattern[] = [
       /first[_-]?name/i,
       /fname/i,
       /given[_-]?name/i,
-      /first/i,
+      /^first$/i,
       /forename/i,
     ],
     autocompleteValues: ['given-name'],
@@ -89,14 +90,13 @@ const FIELD_DICTIONARY: FieldPattern[] = [
   {
     profileField: 'phones.primary',
     patterns: [
-      /phone/i,
-      /mobile/i,
+      /^phone$/i,
+      /^mobile$/i,
       /^tel$/i,
-      /telephone/i,
-      /contact[_-]?number/i,
-      /mobile[_-]?number/i,
-      /phone[_-]?number/i,
-      /cell/i,
+      /^telephone$/i,
+      /^(?:phone|mobile|telephone|cell)[_-]?(?:number|no)$/i,
+      /^contact[_-]?(?:number|phone)$/i,
+      /^cell[_-]?phone$/i,
     ],
     autocompleteValues: ['tel', 'tel-national'],
     inputTypes: ['tel'],
@@ -436,7 +436,7 @@ export function getLabelText(el: HTMLElement): string | undefined {
   const prev = el.previousElementSibling;
   if (prev && ['LABEL', 'SPAN', 'P', 'DIV'].includes(prev.tagName)) {
     const text = prev.textContent?.trim();
-    if (text && text.length < 100) return text;
+    if (text && text.length < 240) return text;
   }
 
   // 6. Walk up ancestors to find the closest "question container"
@@ -448,20 +448,22 @@ export function getLabelText(el: HTMLElement): string | undefined {
   while (ancestor && depth < 6) {
     // Look for text-bearing elements before the input within this ancestor
     const textEls = ancestor.querySelectorAll(
-      'span, h1, h2, h3, h4, h5, h6, p, legend, [role="heading"], [data-initial-value]',
+      'label, span, h1, h2, h3, h4, h5, h6, p, legend, div, [role="heading"], [data-initial-value]',
     );
+    let closestText: string | undefined;
     for (const textEl of textEls) {
       // Skip if the text element is inside or IS the input
       if (textEl === el || textEl.contains(el) || el.contains(textEl)) continue;
       // Skip tiny or huge text
       const text = textEl.textContent?.trim();
-      if (text && text.length > 1 && text.length < 200) {
+      if (text && text.length > 1 && text.length < 240) {
         // Make sure this text element comes BEFORE the input in DOM order
         if (textEl.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING) {
-          return text;
+          closestText = text;
         }
       }
     }
+    if (closestText) return closestText;
     const ancestorRoot = ancestor.getRootNode();
     ancestor = ancestor.parentElement
       ?? (ancestorRoot instanceof ShadowRoot ? ancestorRoot.host as HTMLElement : null);
@@ -557,6 +559,14 @@ export function scanPageFields(): DetectedField[] {
       placeholder: el.getAttribute('placeholder') || undefined,
       ariaLabel: el.getAttribute('aria-label') || undefined,
       labelText: getLabelText(el),
+      helpText: (el.getAttribute('aria-describedby') ?? '')
+        .split(/\s+/)
+        .map((id) => document.getElementById(id)?.textContent?.trim() ?? '')
+        .filter(Boolean)
+        .join(' ') || undefined,
+      maxLength: el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
+        ? (el.maxLength > 0 ? el.maxLength : undefined)
+        : undefined,
     };
 
     const inputType = el instanceof HTMLInputElement ? (el.type || 'text') : el.tagName.toLowerCase();
@@ -585,18 +595,23 @@ export function scanPageFields(): DetectedField[] {
       continue;
     }
 
-    // Try to match field
-    const match = matchField(attributes, inputType);
+    const currentValue = el.value || '';
+    const isApplicationQuestion = isApplicationQuestionCandidate({
+      tagName: el.tagName.toLowerCase(),
+      inputType,
+      attributes,
+    });
+    const match = isApplicationQuestion ? null : matchField(attributes, inputType);
 
     detected.push({
       selector: getUniqueSelector(el),
       tagName: el.tagName.toLowerCase(),
       inputType,
       attributes,
-      profileField: match?.profileField ?? null,
-      confidence: match?.confidence ?? 0,
-      category: match ? 'SAFE_AUTO' : 'UNKNOWN',
-      currentValue: el.value || '',
+      profileField: isApplicationQuestion ? null : (match?.profileField ?? null),
+      confidence: isApplicationQuestion ? 1 : (match?.confidence ?? 0),
+      category: isApplicationQuestion ? 'APPLICATION_QUESTION' : (match ? 'SAFE_AUTO' : 'UNKNOWN'),
+      currentValue,
     });
   }
 
