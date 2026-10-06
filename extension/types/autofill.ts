@@ -43,6 +43,7 @@ export type ProfileFieldKey =
   | 'education.latest.endDate'
   | 'experience.latest.company'
   | 'experience.latest.title'
+  | 'experience.latest.location'
   | 'experience.latest.startDate'
   | 'experience.latest.endDate'
   | 'experience.latest.description'

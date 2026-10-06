@@ -67,6 +67,22 @@ function setNativeValue(el: HTMLInputElement | HTMLTextAreaElement, value: strin
   }
 }
 
+function getWorkdayDatePartValue(el: HTMLInputElement, value: string): string | undefined {
+  const automationId = el.getAttribute('data-automation-id');
+  if (el.getAttribute('role') !== 'spinbutton' || !automationId?.startsWith('dateSection')) return undefined;
+
+  let month: string | undefined;
+  let year: string | undefined;
+  const isoDate = value.match(/^(\d{4})-(\d{2})(?:-\d{2})?$/);
+  const monthYear = value.match(/^(\d{1,2})[/-](\d{4})$/);
+  if (isoDate) [, year, month] = isoDate;
+  else if (monthYear) [, month, year] = monthYear;
+
+  if (automationId === 'dateSectionMonth-input') return month;
+  if (automationId === 'dateSectionYear-input') return year;
+  return undefined;
+}
+
 /**
  * Dispatch native DOM events that frameworks listen to.
  * Also directly triggers React fiber onChange to commit value into React state.
@@ -350,7 +366,10 @@ export function fillFields(mappings: FieldMapping[]): AutofillResult {
       let ok = false;
 
       if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
-        setNativeValue(el, mapping.value);
+        const value = el instanceof HTMLInputElement
+          ? getWorkdayDatePartValue(el, mapping.value) ?? mapping.value
+          : mapping.value;
+        setNativeValue(el, value);
         dispatchInputEvents(el, true /* skipBlur */);
         ok = true;
       } else if (el instanceof HTMLSelectElement) {

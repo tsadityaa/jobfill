@@ -14,7 +14,7 @@ const DOCUMENT_TYPES: DocumentType[] = [
 ];
 
 export function classifyDocumentFieldDeterministically(label: string): DocumentType | null {
-  const normalized = label.toLowerCase().replace(/[_-]+/g, ' ');
+  const normalized = label.replace(/([a-z0-9])([A-Z])/g, '$1 $2').toLowerCase().replace(/[_-]+/g, ' ');
   if (/\b(resume|cv|curriculum\s+vitae)\b/.test(normalized)) return 'resume';
   if (/\bcover\s+letter\b/.test(normalized)) return 'cover_letter';
   if (/\b(transcript|mark\s*sheet|academic\s+record)\b/.test(normalized)) return 'transcript';

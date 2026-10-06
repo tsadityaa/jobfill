@@ -92,6 +92,8 @@ export function resolveProfileValue(
       return profile.experience[0]?.company;
     case 'experience.latest.title':
       return profile.experience[0]?.title;
+    case 'experience.latest.location':
+      return profile.experience[0]?.location;
     case 'experience.latest.startDate':
       return profile.experience[0]?.startDate;
     case 'experience.latest.endDate':

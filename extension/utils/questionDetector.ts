@@ -15,14 +15,14 @@ export function getApplicationQuestionText(field: Pick<DetectedField, 'attribute
 export function isApplicationQuestionCandidate(
   field: Pick<DetectedField, 'tagName' | 'inputType' | 'attributes'>,
 ): boolean {
-  if (field.tagName !== 'textarea' && !TEXT_INPUT_TYPES.has(field.inputType.toLowerCase())) return false;
+  const isTextarea = field.tagName.toLowerCase() === 'textarea' || field.inputType.toLowerCase() === 'textarea';
+  if (isTextarea) return true;
+  if (!TEXT_INPUT_TYPES.has(field.inputType.toLowerCase())) return false;
 
   const question = getApplicationQuestionText(field);
   if (!question) return false;
 
-  const isPromptedTextarea = field.tagName === 'textarea'
-    && ((field.attributes.maxLength ?? 0) >= 200 || question.length >= 24);
-  return QUESTION_SIGNAL.test(question) || isPromptedTextarea;
+  return QUESTION_SIGNAL.test(question);
 }
 
 export function detectApplicationQuestions(fields: DetectedField[]): Array<{ field: DetectedField; question: string }> {

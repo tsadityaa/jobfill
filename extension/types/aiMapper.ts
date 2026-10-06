@@ -90,6 +90,7 @@ export const ALL_INTENT_KEYS: ProfileFieldKey[] = [
   'education.latest.endDate',
   'experience.latest.company',
   'experience.latest.title',
+  'experience.latest.location',
   'experience.latest.startDate',
   'experience.latest.endDate',
   'experience.latest.description',

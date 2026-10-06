@@ -224,6 +224,30 @@ const FIELD_DICTIONARY: FieldPattern[] = [
     ],
     autocompleteValues: ['organization-title'],
   },
+  {
+    profileField: 'experience.latest.location',
+    patterns: [
+      /workexperience.*location/i,
+      /^experience[_-]?location$/i,
+    ],
+    autocompleteValues: [],
+  },
+  {
+    profileField: 'experience.latest.startDate',
+    patterns: [
+      /workexperience.*(?:start|from)date/i,
+      /^(?:experience|employment)[_-]?(?:start|from)[_-]?date$/i,
+    ],
+    autocompleteValues: [],
+  },
+  {
+    profileField: 'experience.latest.endDate',
+    patterns: [
+      /workexperience.*(?:end|to)date/i,
+      /^(?:experience|employment)[_-]?(?:end|to)[_-]?date$/i,
+    ],
+    autocompleteValues: [],
+  },
 
   // ---- Professional ----
   {
@@ -655,7 +679,11 @@ function getVisibleFileInputLabel(input: HTMLInputElement): string | undefined {
     for (const trigger of triggers) {
       if (!isRenderedField(trigger)) continue;
       const text = trigger.textContent?.replace(/\s+/g, ' ').trim();
-      if (text && text.length < 240) return text;
+      const metadata = [trigger.getAttribute('aria-label'), trigger.id, trigger.getAttribute('data-automation-id')]
+        .filter(Boolean)
+        .map((value) => value!.replace(/([a-z0-9])([A-Z])/g, '$1 $2'));
+      const label = [...metadata, text].filter(Boolean).join(' ').trim();
+      if (label && label.length < 240) return label;
     }
     ancestor = ancestor.parentElement;
     depth++;
