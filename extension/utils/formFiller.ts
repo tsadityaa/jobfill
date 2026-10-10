@@ -107,6 +107,13 @@ function dispatchInputEvents(el: HTMLInputElement | HTMLTextAreaElement | HTMLSe
   }
 }
 
+export function fillQuestionAnswer(el: HTMLInputElement | HTMLTextAreaElement, value: string): boolean {
+  if (!value.trim()) return false;
+  setNativeValue(el, value);
+  dispatchInputEvents(el);
+  return el.value === value;
+}
+
 /**
  * Fill a <select> element by matching option text or value.
  */

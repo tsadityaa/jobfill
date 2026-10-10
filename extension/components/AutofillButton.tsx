@@ -177,6 +177,7 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
 
     void chrome.runtime.sendMessage({ type: 'TRIGGER_AUTOFILL', tabId, profileMappingPending: mappingIsPending });
     void chrome.runtime.sendMessage({ type: 'TRIGGER_FILE_UPLOADS', tabId });
+    void chrome.runtime.sendMessage({ type: 'TRIGGER_CHOICE_AUTOFILL', tabId });
     const regexMappings = createFieldMappings(result.fields, profile);
     const regexSelectors = new Set(regexMappings.map((mapping) => mapping.selector));
     const combinedMappings = [
@@ -278,6 +279,10 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
         await clearTabResult(tab.id);
         cached = null;
       }
+      if (isGoogleFormsTab && cached?.aiMappingComplete === false) {
+        await clearTabResult(tab.id);
+        cached = null;
+      }
 
       if (cached === null || cached.status === 'running') {
         console.log('[AutofillButton] Requesting background pre-scan...');
@@ -290,7 +295,7 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
           .filter((field) => field.category === 'APPLICATION_QUESTION' || field.category === 'FILE_UPLOAD')
           .map((field) => field.selector));
         const resolvedCachedMappings = cached.aiMappings
-          .filter((mapping) => !questionSelectors.has(mapping.selector))
+          .filter((mapping) => isGoogleFormsTab || !questionSelectors.has(mapping.selector))
           .map((mapping) => ({
             ...mapping,
             value: mapping.value || resolveProfileValue(profile, mapping.profileField) || '',

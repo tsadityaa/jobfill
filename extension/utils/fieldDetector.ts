@@ -304,9 +304,9 @@ function getLocalSelector(el: Element, root: Document | ShadowRoot): string {
       // Unique on the page — perfectly stable selector
       return `${tag}[name="${escaped}"]`;
     }
-    // Multiple elements share this name (e.g. radio buttons) — use positional index
-    const idx = Array.from(byTagAndName).indexOf(el) + 1;
-    return `${tag}[name="${escaped}"]:nth-of-type(${idx})`;
+    // Duplicate-name controls may have different parents, so nth-of-type on
+    // the document query does not correspond to their sibling position.
+    // Fall through to a unique ID or structural selector instead.
   }
 
   // 2. Stable autocomplete attribute — set by the site, not generated
@@ -380,7 +380,7 @@ function getLocalSelector(el: Element, root: Document | ShadowRoot): string {
 /**
  * Generate a unique CSS selector for an element, including open shadow roots.
  */
-function getUniqueSelector(el: Element): string {
+export function getUniqueSelector(el: Element): string {
   const root = el.getRootNode();
   if (root instanceof ShadowRoot) {
     return `${getUniqueSelector(root.host)}${SHADOW_SELECTOR_SEPARATOR}${getLocalSelector(el, root)}`;
@@ -444,6 +444,11 @@ export function getLabelText(el: HTMLElement): string | undefined {
     const text = clone.textContent?.trim();
     if (text) return text;
   }
+
+  const googleFormCard = el.closest<HTMLElement>('[role="listitem"]');
+  const googleFormHeading = googleFormCard?.querySelector<HTMLElement>('[role="heading"], h1, h2, h3, h4');
+  const googleFormQuestion = googleFormHeading?.textContent?.replace(/\s+/g, ' ').trim();
+  if (googleFormQuestion && googleFormQuestion.length < 240) return googleFormQuestion;
 
   // 3. Check aria-labelledby
   const labelledBy = el.getAttribute('aria-labelledby');

@@ -15,11 +15,13 @@
 /// <reference types="chrome" />
 
 import { getElementBySelector, hasVisibleFormFields, scanPageFields, extractSanitizedFields } from '../utils/fieldDetector';
-import { fillFields } from '../utils/formFiller';
+import { fillFields, fillQuestionAnswer } from '../utils/formFiller';
 import { detectJobPage } from '../utils/jobPageDetector';
 import { computeFormFingerprint } from '../utils/formFingerprint';
 import type { ContentScriptRequest, ScanFieldsResponse, FillFieldsResponse, AIScanFieldsResponse, InjectFileResponse, DetectJobPageResponse, WaitForFormReadyResponse, PrescanResponse } from '../types/messages';
 import type { ScanResult } from '../types/autofill';
+import { applyChoiceDecisions, extractChoiceFormAnswers, scanChoiceControls } from '../utils/choiceControls';
+import type { ChoiceApplyResponse, ChoiceScanResponse } from '../types/choice';
 
 let lastPrescannedFingerprint: string | null = null;
 const questionBorderOverlays = new Map<string, { target: HTMLElement; overlay: HTMLDivElement }>();
@@ -258,7 +260,7 @@ export default defineContentScript({
       (
         message: ContentScriptRequest,
         _sender,
-        sendResponse: (response: ScanFieldsResponse | FillFieldsResponse | AIScanFieldsResponse | InjectFileResponse | DetectJobPageResponse | WaitForFormReadyResponse | PrescanResponse | { type: 'QUESTION_ANSWER_FILLED'; success: boolean }) => void,
+        sendResponse: (response: ScanFieldsResponse | FillFieldsResponse | AIScanFieldsResponse | InjectFileResponse | DetectJobPageResponse | WaitForFormReadyResponse | PrescanResponse | ChoiceScanResponse | ChoiceApplyResponse | { type: 'QUESTION_ANSWER_FILLED'; success: boolean }) => void,
       ) => {
         switch (message.type) {
           case 'SCAN_FIELDS': {
@@ -327,6 +329,26 @@ export default defineContentScript({
             return true; // Keep message channel open for async response
           }
 
+          case 'CHOICE_SCAN': {
+            scanChoiceControls().then((controls) => {
+              sendResponse({ type: 'CHOICE_SCAN_RESULT', controls, formAnswers: extractChoiceFormAnswers() });
+            }).catch((error) => {
+              console.warn('[JobFill] Choice scan failed:', error);
+              sendResponse({ type: 'CHOICE_SCAN_RESULT', controls: [], formAnswers: [] });
+            });
+            return true;
+          }
+
+          case 'CHOICE_APPLY': {
+            applyChoiceDecisions(message.decisions).then((result) => {
+              sendResponse({ type: 'CHOICE_APPLY_RESULT', ...result });
+            }).catch((error) => {
+              console.warn('[JobFill] Choice application failed:', error);
+              sendResponse({ type: 'CHOICE_APPLY_RESULT', applied: [], unresolved: message.decisions.map((decision) => decision.controlId) });
+            });
+            return true;
+          }
+
           case 'FILL_FIELDS': {
             const fillResult = fillFields(message.mappings);
             sendResponse({ type: 'FILL_FIELDS_RESULT', result: fillResult });
@@ -349,16 +371,8 @@ export default defineContentScript({
                   sendResponse({ type: 'QUESTION_ANSWER_FILLED', success: true });
                   break;
                 }
-                const valueSetter = Object.getOwnPropertyDescriptor(
-                  element instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype,
-                  'value',
-                )?.set;
-                valueSetter?.call(element, message.answer);
-                element.dispatchEvent(new Event('input', { bubbles: true }));
-                element.dispatchEvent(new Event('change', { bubbles: true }));
-                element.dispatchEvent(new Event('blur', { bubbles: true }));
-                setQuestionBorderPending(message.selector, false);
-                success = true;
+                success = fillQuestionAnswer(element, message.answer);
+                if (success) setQuestionBorderPending(message.selector, false);
               }
             } catch {
               success = false;

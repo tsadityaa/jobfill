@@ -56,7 +56,7 @@ export async function mapFieldsWithAI(
 
   if (!apiKey || apiKey === 'xyzz') {
     console.warn('[AI Mapper] No valid API key configured');
-    return { mappings: {} };
+    return { mappings: {}, completed: false };
   }
 
   // Use a fast, smart model like gpt-4o-mini or claude-3-haiku via OpenRouter
@@ -90,6 +90,7 @@ export async function mapFieldsWithAI(
           { role: 'user', content: userPrompt }
         ],
         temperature: 0.1, // Low temperature for accuracy
+        max_tokens: 600,
         response_format: { type: 'json_object' } // Force JSON output if supported
       }),
     });
@@ -98,7 +99,7 @@ export async function mapFieldsWithAI(
       clearTimeout(timeoutId);
       const errorText = await response.text();
       console.error('[AI Mapper] API error:', response.status, errorText);
-      return { mappings: {} };
+      return { mappings: {}, completed: false };
     }
 
     const data = await response.json();
@@ -108,7 +109,7 @@ export async function mapFieldsWithAI(
     const text = data?.choices?.[0]?.message?.content;
     if (!text) {
       console.error('[AI Mapper] Empty response from API');
-      return { mappings: {} };
+      return { mappings: {}, completed: false };
     }
 
     // Parse JSON response. Handle cases where the model might still wrap in markdown
@@ -130,10 +131,10 @@ export async function mapFieldsWithAI(
       `[AI Mapper] Mapped ${Object.keys(validatedMappings).length}/${fields.length} fields`,
     );
 
-    return { mappings: validatedMappings };
+    return { mappings: validatedMappings, completed: true };
   } catch (err) {
     console.error('[AI Mapper] Failed:', err);
-    return { mappings: {} };
+    return { mappings: {}, completed: false };
   }
 }
 

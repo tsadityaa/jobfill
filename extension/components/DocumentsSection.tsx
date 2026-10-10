@@ -142,14 +142,15 @@ export default function DocumentsSection() {
         await saveDocumentRegistryMetadata(metadata);
         setDocuments((prev) => [metadata, ...prev]);
         
-        // --- Memory Engine: Ingest Resume ---
-        if (category === 'resume' && mimeType === 'application/pdf') {
+        // --- Memory Engine: Index searchable documents for application answers ---
+        if (mimeType === 'application/pdf' || /\.docx?$/i.test(file.name)) {
           try {
             const user = await getCurrentUser();
             if (user) {
-              console.log('[Memory] Extracting resume text...');
-              const url = await uploadToPdfCo(file, file.name);
-              const text = await pdfToText(url);
+              console.log(`[Memory] Extracting text from ${file.name}...`);
+              const sourceUrl = await uploadToPdfCo(file, file.name);
+              const readableUrl = mimeType === 'application/pdf' ? sourceUrl : await wordToPdf(sourceUrl);
+              const text = await pdfToText(readableUrl);
               
               if (text && text.trim().length > 0) {
                 const contentToStore = `Document Category: ${category}\nFile Name: ${file.name}\n\nContent:\n${text}`;

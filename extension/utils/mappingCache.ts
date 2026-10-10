@@ -19,7 +19,7 @@ import type { ScanResult, FieldMapping } from '../types/autofill';
 const CACHE_KEY = 'jf_map_cache';
 const TAB_RESULT_KEY = 'jf_tab_results';
 const MAX_CACHE_ENTRIES = 50; // keep storage bounded
-export const GOOGLE_FORM_MAPPING_VERSION = 9;
+export const GOOGLE_FORM_MAPPING_VERSION = 12;
 
 export interface CachedMapping {
   fingerprint: string;

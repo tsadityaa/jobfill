@@ -16,6 +16,7 @@ const THRESHOLD_POSSIBLE = 5;
 const URL_STRONG_PATTERNS = [
   /\/apply(\/|$|\?)/i,
   /\/application(\/|$|\?)/i,
+  /\/create_application(\/|$|\?)/i,
   /\/jobs\/.*apply/i,
   /\/candidate(\/|$|\?)/i,
   /workday\.com/i,
@@ -33,6 +34,7 @@ const URL_STRONG_PATTERNS = [
   /recruitee\.com/i,
   /breezy\.hr/i,
   /dover\.com\/apply/i,
+  /metacareers\.com/i,
 ];
 
 const URL_WEAK_PATTERNS = [
@@ -84,13 +86,22 @@ const TEXT_WEAK = [
 export function detectJobPage(): { classification: JobPageClassification; score: number } {
   let score = 0;
   const url = window.location.href;
+  const scoreBreakdown: Array<{ source: string; pattern: string; points: number }> = [];
 
   // URL signals
   for (const p of URL_STRONG_PATTERNS) {
-    if (p.test(url)) { score += 5; break; }
+    if (p.test(url)) {
+      score += 5;
+      scoreBreakdown.push({ source: 'url-strong', pattern: p.source, points: 5 });
+      break;
+    }
   }
   for (const p of URL_WEAK_PATTERNS) {
-    if (p.test(url)) { score += 2; break; }
+    if (p.test(url)) {
+      score += 2;
+      scoreBreakdown.push({ source: 'url-weak', pattern: p.source, points: 2 });
+      break;
+    }
   }
 
   // Field label signals — scan visible form fields
@@ -116,19 +127,25 @@ export function detectJobPage(): { classification: JobPageClassification; score:
 
   const fieldText = allFieldText.join(' ');
 
-  for (const p of FIELD_STRONG)   { if (p.test(fieldText)) score += 4; }
-  for (const p of FIELD_MODERATE) { if (p.test(fieldText)) score += 3; }
-  for (const p of FIELD_WEAK)     { if (p.test(fieldText)) score += 1; }
+  for (const p of FIELD_STRONG)   { if (p.test(fieldText)) { score += 4; scoreBreakdown.push({ source: 'field-strong', pattern: p.source, points: 4 }); } }
+  for (const p of FIELD_MODERATE) { if (p.test(fieldText)) { score += 3; scoreBreakdown.push({ source: 'field-moderate', pattern: p.source, points: 3 }); } }
+  for (const p of FIELD_WEAK)     { if (p.test(fieldText)) { score += 1; scoreBreakdown.push({ source: 'field-weak', pattern: p.source, points: 1 }); } }
 
   // Page text signals — limit to first 3000 chars to stay fast
   const bodyText = (document.body?.innerText ?? '').slice(0, 3000);
-  for (const p of TEXT_STRONG) { if (p.test(bodyText)) score += 3; }
-  for (const p of TEXT_WEAK)   { if (p.test(bodyText)) score += 1; }
+  for (const p of TEXT_STRONG) { if (p.test(bodyText)) { score += 3; scoreBreakdown.push({ source: 'text-strong', pattern: p.source, points: 3 }); } }
+  for (const p of TEXT_WEAK)   { if (p.test(bodyText)) { score += 1; scoreBreakdown.push({ source: 'text-weak', pattern: p.source, points: 1 }); } }
 
   const classification: JobPageClassification =
     score >= THRESHOLD_JOB      ? 'JOB_APPLICATION' :
     score >= THRESHOLD_POSSIBLE  ? 'POSSIBLE_JOB'   :
                                    'NOT_JOB';
+
+  console.info(`[JobFill] Page classification: ${classification} (score: ${score}, thresholds: JOB≥${THRESHOLD_JOB} POSSIBLE≥${THRESHOLD_POSSIBLE})`, {
+    url,
+    visibleFieldCount: allFieldText.length,
+    scoreBreakdown,
+  });
 
   return { classification, score };
 }

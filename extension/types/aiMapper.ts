@@ -61,6 +61,7 @@ export interface AIMappingRequest {
  */
 export interface AIMappingResponse {
   mappings: Record<string, ProfileFieldKey>;
+  completed?: boolean;
 }
 
 /**

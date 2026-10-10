@@ -10,6 +10,7 @@ import type { ScanResult, AutofillResult, FieldMapping } from './autofill';
 import type { SanitizedField, FieldIdLookup } from './aiMapper';
 import type { JobPageClassification } from '../utils/jobPageDetector';
 import type { QuestionTask } from './questionTask';
+import type { ChoiceApplyRequest, ChoiceApplyResponse, ChoiceScanRequest, ChoiceScanResponse } from './choice';
 
 // ---- Request Messages (popup/background → content script) ----
 
@@ -54,6 +55,11 @@ export interface SetQuestionPendingRequest {
   type: 'SET_QUESTION_PENDING';
   selectors: string[];
   pending: boolean;
+}
+
+export interface TriggerChoiceAutofillRequest {
+  type: 'TRIGGER_CHOICE_AUTOFILL';
+  tabId: number;
 }
 
 export interface AIScanFieldsRequest {
@@ -164,6 +170,11 @@ export type ExtensionMessage =
   | InjectFileResponse
   | FillQuestionAnswerRequest
   | SetQuestionPendingRequest
+  | ChoiceScanRequest
+  | ChoiceApplyRequest
+  | ChoiceScanResponse
+  | ChoiceApplyResponse
+  | TriggerChoiceAutofillRequest
   | QuestionTasksResponse;
 
 export type ContentScriptRequest =
@@ -175,7 +186,9 @@ export type ContentScriptRequest =
   | PrescanRequest
   | InjectFileRequest
   | FillQuestionAnswerRequest
-  | SetQuestionPendingRequest;
+  | SetQuestionPendingRequest
+  | ChoiceScanRequest
+  | ChoiceApplyRequest;
 
 export type ContentScriptResponse =
   | ScanFieldsResponse
