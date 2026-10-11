@@ -1,7 +1,6 @@
 import type { UserProfile } from '../types/profile';
 import { isLinkRequestQuestion } from './questionDetector';
-
-const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
+import { requestOpenRouter } from './backendClient';
 
 export function formatProfileAnswerContext(profile: UserProfile): string {
   const facts = [
@@ -52,40 +51,30 @@ function canonicalizeHttpUrl(value: string): string | undefined {
   }
 }
 
-async function selectRelevantMemoryLinks(question: string, memories: string[], apiKey: string): Promise<string> {
+async function selectRelevantMemoryLinks(question: string, memories: string[]): Promise<string> {
   const availableLinks = extractMemoryLinks(memories);
   if (availableLinks.length === 0) return '';
 
-  const response = await fetch(OPENROUTER_API_URL, {
-    method: 'POST',
-    signal: AbortSignal.timeout(30000),
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
-      'HTTP-Referer': 'http://localhost:3000',
-      'X-Title': 'Personal Copilot Extension',
-    },
-    body: JSON.stringify({
-      model: 'openai/gpt-4o-mini',
-      temperature: 0,
-      max_tokens: 300,
-      response_format: { type: 'json_object' },
-      messages: [
-        {
-          role: 'system',
-          content: 'Select only URLs from the supplied Supermemory results that directly match what the question asks for. Do not include unrelated links such as LinkedIn, a general portfolio, company websites, job sites, or project repositories unless the question specifically requests them. Never invent, edit, or normalize a URL. Return only JSON in this format: {"links":["exact URL"]}. Return an empty array if no supplied URL is relevant.',
-        },
-        {
-          role: 'user',
-          content: JSON.stringify({
-            question,
-            availableUrls: availableLinks,
-            supermemoryResults: memories.map((memory) => memory.slice(0, 1800)),
-          }),
-        },
-      ],
-    }),
-  });
+  const response = await requestOpenRouter({
+    model: 'openai/gpt-4o-mini',
+    temperature: 0,
+    max_tokens: 300,
+    response_format: { type: 'json_object' },
+    messages: [
+      {
+        role: 'system',
+        content: 'Select only URLs from the supplied Supermemory results that directly match what the question asks for. Do not include unrelated links such as LinkedIn, a general portfolio, company websites, job sites, or project repositories unless the question specifically requests them. Never invent, edit, or normalize a URL. Return only JSON in this format: {"links":["exact URL"]}. Return an empty array if no supplied URL is relevant.',
+      },
+      {
+        role: 'user',
+        content: JSON.stringify({
+          question,
+          availableUrls: availableLinks,
+          supermemoryResults: memories.map((memory) => memory.slice(0, 1800)),
+        }),
+      },
+    ],
+  }, AbortSignal.timeout(30000));
 
   if (!response.ok) throw new Error(`OpenRouter link selection failed (${response.status}).`);
   const data = await response.json();
@@ -114,29 +103,46 @@ async function selectRelevantMemoryLinks(question: string, memories: string[], a
   return result.join(', ');
 }
 
+export function cleanAnswerText(raw: unknown): string {
+  if (raw == null) return '';
+  if (typeof raw === 'object') {
+    const obj = raw as Record<string, unknown>;
+    for (const key of ['response', 'answer', 'text', 'result', 'value']) {
+      if (typeof obj[key] === 'string' && obj[key].trim()) {
+        return cleanAnswerText(obj[key]);
+      }
+    }
+    const str = Object.values(obj).find((v): v is string => typeof v === 'string' && Boolean(v.trim()));
+    if (str) return cleanAnswerText(str);
+    return '';
+  }
+  let text = String(raw).trim();
+  text = text.replace(/^```(?:json)?\s*([\s\S]*?)\s*```$/i, '$1').trim();
+  if (text.startsWith('{') && text.endsWith('}')) {
+    try {
+      const parsed = JSON.parse(text);
+      return cleanAnswerText(parsed);
+    } catch {}
+  }
+  const regexMatch = text.match(/^\s*\{?\s*"(?:response|answer|text|result|value)"\s*:\s*"([\s\S]*?)"?\s*\}?\s*$/);
+  if (regexMatch) {
+    return regexMatch[1].replace(/\\"/g, '"').replace(/\\n/g, '\n').trim();
+  }
+  return text;
+}
+
 export async function generateApplicationAnswer(question: string, memories: string[], profileContext: string): Promise<string> {
-  const apiKey = import.meta.env.VITE_OPENROUTER_API_KEY;
-  if (!apiKey || apiKey === 'xyzz') throw new Error('OpenRouter API key is not configured.');
   if (isLinkRequestQuestion(question)) {
-    return selectRelevantMemoryLinks(question, memories, apiKey);
+    return selectRelevantMemoryLinks(question, memories);
   }
   if (!memories.length && !profileContext.trim()) throw new Error('Add professional skills or experience to your profile before generating answers.');
 
-  const response = await fetch(OPENROUTER_API_URL, {
-    method: 'POST',
-    signal: AbortSignal.timeout(30000),
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
-      'HTTP-Referer': 'http://localhost:3000',
-      'X-Title': 'Personal Copilot Extension',
-    },
-    body: JSON.stringify({
+  const response = await requestOpenRouter({
       model: 'openai/gpt-4o-mini',
       messages: [
         {
           role: 'system',
-          content: 'First classify the question. If it asks for a direct personal/profile fact (for example name, contact details, current location/address, current employer/company, date of birth, or graduation year), answer with only the exact requested value found in the supplied profile facts or relevant memories. Do not add first-person wording, explanations, or unrelated facts. Preserve saved addresses and other personal values exactly as stored. For graduation-year questions, return only the explicit four-digit year; for employer questions, return only the company name. Do not infer or invent missing facts; return an empty string if the requested value is unavailable. For open-ended questions (for example why the candidate should be hired), write a concise, specific first-person answer grounded in supplied skills and experience. Do not invent projects, experience, metrics, motivations, or claims; avoid generic filler.',
+          content: 'First classify the question. If it asks for a direct personal/profile fact (for example name, contact details, current location/address, current employer/company, date of birth, or graduation year), answer with only the exact requested value found in the supplied profile facts or relevant memories. Do not add first-person wording, explanations, or unrelated facts. Preserve saved addresses and other personal values exactly as stored. For graduation-year questions, return only the explicit four-digit year; for employer questions, return only the company name. Do not infer or invent missing facts; return an empty string if the requested value is unavailable. For open-ended questions (for example why the candidate should be hired), write a concise, specific first-person answer grounded in supplied skills and experience. Do not invent projects, experience, metrics, motivations, or claims; avoid generic filler. CRITICAL: Output ONLY plain text. Do NOT output JSON, code blocks, or key-value structures like {"response":"..."}. Respond directly with the text.',
         },
         {
           role: 'user',
@@ -145,13 +151,12 @@ export async function generateApplicationAnswer(question: string, memories: stri
       ],
       temperature: 0.4,
       max_tokens: 600,
-    }),
-  });
+    }, AbortSignal.timeout(30000));
 
   if (!response.ok) throw new Error(`OpenRouter request failed (${response.status}).`);
   const data = await response.json();
   const answer = data?.choices?.[0]?.message?.content;
-  return typeof answer === 'string' ? answer.trim() : '';
+  return cleanAnswerText(answer);
 }
 
 export interface ApplicationAnswerRequest {
@@ -164,22 +169,11 @@ export async function generateApplicationAnswers(
   requests: ApplicationAnswerRequest[],
   profileContext: string,
 ): Promise<Record<string, string>> {
-  const apiKey = import.meta.env.VITE_OPENROUTER_API_KEY;
-  if (!apiKey || apiKey === 'xyzz') throw new Error('OpenRouter API key is not configured.');
   if (requests.length === 0 || (!profileContext.trim() && requests.every((request) => request.memories.length === 0))) {
     return {};
   }
 
-  const response = await fetch(OPENROUTER_API_URL, {
-    method: 'POST',
-    signal: AbortSignal.timeout(30000),
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
-      'HTTP-Referer': 'http://localhost:3000',
-      'X-Title': 'Personal Copilot Extension',
-    },
-    body: JSON.stringify({
+  const response = await requestOpenRouter({
       model: 'openai/gpt-4o-mini',
       temperature: 0.3,
       max_tokens: 600,
@@ -194,17 +188,17 @@ export async function generateApplicationAnswers(
           content: JSON.stringify({ profileFacts: profileContext, questions: requests }),
         },
       ],
-    }),
-  });
+    }, AbortSignal.timeout(30000));
 
   if (!response.ok) throw new Error(`OpenRouter request failed (${response.status}).`);
   const data = await response.json();
   const content = data?.choices?.[0]?.message?.content;
   if (typeof content !== 'string') return {};
   const parsed = JSON.parse(content.replace(/^```(?:json)?\s*|\s*```$/g, '')) as { answers?: Record<string, unknown> };
-  return Object.fromEntries(Object.entries(parsed.answers ?? {}).flatMap(([fieldId, answer]) =>
-    typeof answer === 'string' && answer.trim() ? [[fieldId, answer.trim()]] : [],
-  ));
+  return Object.fromEntries(Object.entries(parsed.answers ?? {}).flatMap(([fieldId, answer]) => {
+    const cleaned = cleanAnswerText(answer);
+    return cleaned ? [[fieldId, cleaned]] : [];
+  }));
 }
 
 export async function extractProfileFieldFromDocuments(
@@ -212,19 +206,9 @@ export async function extractProfileFieldFromDocuments(
   profileField: string,
   documentEvidence: string[],
 ): Promise<string | undefined> {
-  const apiKey = import.meta.env.VITE_OPENROUTER_API_KEY;
-  if (!apiKey || apiKey === 'xyzz' || documentEvidence.length === 0) return undefined;
+  if (documentEvidence.length === 0) return undefined;
 
-  const response = await fetch(OPENROUTER_API_URL, {
-    method: 'POST',
-    signal: AbortSignal.timeout(15000),
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
-      'HTTP-Referer': 'http://localhost:3000',
-      'X-Title': 'Personal Copilot Extension',
-    },
-    body: JSON.stringify({
+  const response = await requestOpenRouter({
       model: 'openai/gpt-4o-mini',
       temperature: 0,
       max_tokens: 600,
@@ -239,8 +223,7 @@ export async function extractProfileFieldFromDocuments(
           content: JSON.stringify({ fieldLabel, profileField, documentExcerpts: documentEvidence.map((excerpt) => excerpt.slice(0, 1800)) }),
         },
       ],
-    }),
-  });
+    }, AbortSignal.timeout(15000));
 
   if (!response.ok) throw new Error(`Document field extraction failed (${response.status}).`);
   const data = await response.json();

@@ -1,0 +1,5 @@
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_ANON_KEY=your-supabase-anon-key
+OPENROUTER_API_KEY=your-openrouter-api-key
+SUPERMEMORY_API_KEY=your-supermemory-api-key
+PDFCO_API_KEY=your-pdfco-api-key

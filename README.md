@@ -23,8 +23,8 @@ personal-copilot/
 │   ├── types/          # TypeScript type definitions
 │   ├── utils/          # Utilities (storage, autofill engine)
 │   └── test-pages/     # Test HTML pages for autofill testing
-├── backend/            # (Phase 7) Node.js + Express API
-└── shared/             # (Phase 7) Shared types and schemas
+├── backend/            # Cloudflare Worker API and provider secret proxy
+└── shared/             # Shared types and schemas (planned)
 ```
 
 ## Features

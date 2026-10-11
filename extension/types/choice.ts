@@ -23,6 +23,7 @@ export interface ChoiceDecision {
   selectedOptionIds: string[];
   confidence: number;
   source: 'profile' | 'form' | 'memory' | 'ai' | 'user_preference';
+  otherText?: string;
 }
 
 export interface ChoiceScanRequest {

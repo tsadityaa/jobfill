@@ -7,6 +7,7 @@
 
 import type { FieldMapping, AutofillResult, AutofillFieldResult } from '../types/autofill';
 import { getElementBySelector, scanPageFields } from './fieldDetector';
+import { cleanAnswerText } from './answerGenerator';
 
 /**
  * Find the React fiber key on a DOM node (differs across React versions).
@@ -40,9 +41,9 @@ function triggerReactOnChange(
         type: 'change',
         nativeEvent: new Event('change', { bubbles: true }),
         bubbles: true,
-        preventDefault: () => {},
-        stopPropagation: () => {},
-        persist: () => {},
+        preventDefault: () => { },
+        stopPropagation: () => { },
+        persist: () => { },
       });
       return;
     }
@@ -55,15 +56,16 @@ function triggerReactOnChange(
  * Required for React controlled components (bypasses React's value tracking).
  */
 function setNativeValue(el: HTMLInputElement | HTMLTextAreaElement, value: string): void {
+  const cleanedValue = cleanAnswerText(value);
   const setter =
     el instanceof HTMLTextAreaElement
       ? Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set
       : Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
 
   if (setter) {
-    setter.call(el, value);
+    setter.call(el, cleanedValue);
   } else {
-    el.value = value;
+    el.value = cleanedValue;
   }
 }
 
@@ -166,7 +168,7 @@ function formatDateForInput(el: HTMLInputElement, value: string): string {
  * Also directly triggers React fiber onChange to commit value into React state.
  */
 function dispatchInputEvents(el: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement, skipBlur = false): void {
-  el.dispatchEvent(new FocusEvent('focus',   { bubbles: true }));
+  el.dispatchEvent(new FocusEvent('focus', { bubbles: true }));
   el.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
 
   // Trigger React fiber onChange directly — commits value into React state
@@ -176,20 +178,21 @@ function dispatchInputEvents(el: HTMLInputElement | HTMLTextAreaElement | HTMLSe
   }
 
   // Also fire DOM events for Angular/Vue/non-React forms
-  el.dispatchEvent(new Event('input',  { bubbles: true, composed: true }));
+  el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
   el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
 
   if (!skipBlur) {
-    el.dispatchEvent(new FocusEvent('blur',     { bubbles: true }));
+    el.dispatchEvent(new FocusEvent('blur', { bubbles: true }));
     el.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
   }
 }
 
 export function fillQuestionAnswer(el: HTMLInputElement | HTMLTextAreaElement, value: string): boolean {
-  if (!value.trim()) return false;
-  setNativeValue(el, value);
+  const cleaned = cleanAnswerText(value);
+  if (!cleaned.trim()) return false;
+  setNativeValue(el, cleaned);
   dispatchInputEvents(el);
-  return el.value === value;
+  return el.value === cleaned;
 }
 
 /**
@@ -266,18 +269,18 @@ function ensureStyles() {
 
 /** Particle burst — tiny dots scatter from field centre */
 function burstParticles(el: HTMLElement) {
-  const rect   = el.getBoundingClientRect();
-  const cx     = rect.left + rect.width  / 2 + window.scrollX;
-  const cy     = rect.top  + rect.height / 2 + window.scrollY;
+  const rect = el.getBoundingClientRect();
+  const cx = rect.left + rect.width / 2 + window.scrollX;
+  const cy = rect.top + rect.height / 2 + window.scrollY;
   const colors = ['#00d4ff', '#00ff87', '#ffb300', '#ffffff', '#00d4ff', '#00ff87'];
-  const COUNT  = 12;
+  const COUNT = 12;
 
   for (let i = 0; i < COUNT; i++) {
     const angle = (i / COUNT) * Math.PI * 2 + (Math.random() - 0.5) * 0.5;
-    const dist  = 24 + Math.random() * 40;
+    const dist = 24 + Math.random() * 40;
     const color = colors[i % colors.length];
-    const size  = 2.5 + Math.random() * 3.5;
-    const dur   = 300 + Math.random() * 250;
+    const size = 2.5 + Math.random() * 3.5;
+    const dur = 300 + Math.random() * 250;
 
     const dot = document.createElement('div');
     dot.style.cssText = `
@@ -304,7 +307,7 @@ function burstParticles(el: HTMLElement) {
 
 /** Floating ✓ badge that pops then drifts up and fades */
 function checkBadge(el: HTMLElement) {
-  const rect  = el.getBoundingClientRect();
+  const rect = el.getBoundingClientRect();
   const badge = document.createElement('div');
   badge.textContent = '✓';
   badge.style.cssText = `

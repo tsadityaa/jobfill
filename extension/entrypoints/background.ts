@@ -263,20 +263,47 @@ async function fillQuestionTask(tabId: number, task: QuestionTask): Promise<bool
   if (!task.answer) return false;
   await updateQuestionTask(tabId, task.fieldId, { status: 'FILLING' });
   try {
-    const result = await chrome.tabs.sendMessage(
-      tabId,
-      { type: 'FILL_QUESTION_ANSWER', selector: task.selector, answer: task.answer },
-      { frameId: task.frameId },
-    ) as { success?: boolean };
-    await updateQuestionTask(tabId, task.fieldId, { status: result?.success ? 'FILLED' : 'ERROR' });
+    let result: { success?: boolean } | null = null;
+    try {
+      result = await chrome.tabs.sendMessage(
+        tabId,
+        { type: 'FILL_QUESTION_ANSWER', selector: task.selector, answer: task.answer },
+        { frameId: task.frameId },
+      ) as { success?: boolean };
+    } catch {
+      result = null;
+    }
+
     if (!result?.success) {
+      const allFrames = await chrome.webNavigation.getAllFrames({ tabId }).catch(() => null);
+      if (allFrames && allFrames.length > 1) {
+        for (const frame of allFrames) {
+          if (frame.frameId === task.frameId) continue;
+          try {
+            const frameResult = await chrome.tabs.sendMessage(
+              tabId,
+              { type: 'FILL_QUESTION_ANSWER', selector: task.selector, answer: task.answer },
+              { frameId: frame.frameId },
+            ) as { success?: boolean };
+            if (frameResult?.success) {
+              result = frameResult;
+              break;
+            }
+          } catch { }
+        }
+      }
+    }
+
+    const isSuccess = result?.success === true;
+    await updateQuestionTask(tabId, task.fieldId, { status: isSuccess ? 'FILLED' : 'ERROR' });
+    if (!isSuccess) {
       await chrome.tabs.sendMessage(
         tabId,
         { type: 'SET_QUESTION_PENDING', selectors: [task.selector], pending: false },
         { frameId: task.frameId },
       ).catch(() => undefined);
     }
-    return result?.success === true;
+    return isSuccess;
   } catch (error) {
     await updateQuestionTask(tabId, task.fieldId, {
       status: 'ERROR',
@@ -298,22 +325,30 @@ async function runQuestionPipeline(
   fields: PrescanResponse['scanResult']['fields'],
 ): Promise<void> {
   const detected = detectApplicationQuestions(fields);
-  const tasks: QuestionTask[] = detected.map(({ field }, index) => ({
-    fieldId: `q${index}`,
+  const existingState = await getQuestionState(tabId);
+  const pendingAutofill = pendingQuestionAutofillTabs.get(tabId) ?? false;
+  const autofillRequested = existingState?.autofillRequested || pendingAutofill;
+
+  const existingSelectors = new Set(existingState?.tasks.map((t) => t.selector) ?? []);
+  const existingCount = existingState?.tasks.length ?? 0;
+
+  const newDetected = detected.filter(({ field }) => !existingSelectors.has(field.selector));
+  const newTasks: QuestionTask[] = newDetected.map(({ field }, index) => ({
+    fieldId: `q${existingCount + index}`,
     selector: field.selector,
     frameId,
-    question: detected[index].question,
+    question: newDetected[index].question,
     type: 'application_question',
     status: 'RETRIEVING',
   }));
-  const pendingAutofill = pendingQuestionAutofillTabs.get(tabId) ?? false;
-  pendingQuestionAutofillTabs.delete(tabId);
-  const state = { tabId, url, frameId, autofillRequested: pendingAutofill, tasks };
-  await setQuestionState(state);
-  console.log(`[JobFill BG] Tab ${tabId}: detected ${tasks.length} application question fields`);
-  if (tasks.length === 0) return;
 
-  void processQuestionTasks(tabId, tasks);
+  const allTasks = [...(existingState?.tasks ?? []), ...newTasks];
+  const state = { tabId, url, frameId, autofillRequested, tasks: allTasks };
+  await setQuestionState(state);
+  console.log(`[JobFill BG] Tab ${tabId}: detected ${newTasks.length} new application question fields (total: ${allTasks.length})`);
+  if (newTasks.length === 0) return;
+
+  void processQuestionTasks(tabId, newTasks);
 }
 
 async function processQuestionTasks(tabId: number, tasks: QuestionTask[]): Promise<void> {
@@ -339,7 +374,9 @@ async function processQuestionTasks(tabId: number, tasks: QuestionTask[]): Promi
       await updateQuestionTask(tabId, task.fieldId, { status: 'READY_TO_FILL', answer });
 
       const currentState = await getQuestionState(tabId);
-      if (currentState?.autofillRequested) {
+      const isAutofillRequested = currentState?.autofillRequested || pendingQuestionAutofillTabs.get(tabId) === true;
+      if (isAutofillRequested) {
+        console.log(`[JobFill BG] Tab ${tabId}: auto-filling question task ${task.fieldId} immediately upon AI completion`);
         await fillQuestionTask(tabId, { ...task, answer, status: 'READY_TO_FILL' });
       }
     } catch (error) {
@@ -738,9 +775,9 @@ async function triggerFileUploads(tabId: number): Promise<void> {
 }
 
 async function triggerQuestionAutofill(tabId: number, profileMappingPending: boolean): Promise<void> {
+  pendingQuestionAutofillTabs.set(tabId, true);
   const state = await getQuestionState(tabId);
   if (!state) {
-    pendingQuestionAutofillTabs.set(tabId, true);
     return;
   }
   const retryTasks = state.tasks.filter((task) => task.status === 'ERROR');
@@ -1047,9 +1084,15 @@ async function runPrescanPipeline(tabId: number, googleFormsFrameId?: number): P
               if (!selector || gfExistingSelectors.has(selector)) continue;
 
               const field = scanResult.fields.find((item) => item.selector === selector);
+              const isOtherWriteIn =
+                /^(?:other\s*(?:response|option|answer)?|other:?)$/i.test(field?.attributes.ariaLabel ?? '') ||
+                /^(?:other\s*(?:response|option|answer)?|other:?)$/i.test(field?.attributes.placeholder ?? '') ||
+                /other_option_response/i.test(field?.attributes.name ?? '');
+              if (isOtherWriteIn) continue;
+
               const questionText = (candidate as { label?: string }).label
                 || [field?.attributes.labelText, field?.attributes.ariaLabel, field?.attributes.placeholder, field?.attributes.helpText]
-                    .filter(Boolean).join(' ').replace(/\s+/g, ' ').trim()
+                  .filter(Boolean).join(' ').replace(/\s+/g, ' ').trim()
                 || 'Unknown field';
 
               gfP2Tasks.push({
@@ -1064,7 +1107,9 @@ async function runPrescanPipeline(tabId: number, googleFormsFrameId?: number): P
 
             if (gfP2Tasks.length > 0) {
               console.log(`[JobFill BG] Tab ${tabId}: Google Forms Pipeline 1 → NO_PROFILE_MATCH for ${gfP2Tasks.length} fields; dispatching to Pipeline 2 (fire-and-forget)`);
-              void appendQuestionTasks(tabId, scanResult.url, frameId, gfP2Tasks)
+              const isAutofillPending = (pendingQuestionAutofillTabs.get(tabId) ?? false)
+                || Boolean(gfExistingState?.autofillRequested);
+              void appendQuestionTasks(tabId, scanResult.url, frameId, gfP2Tasks, isAutofillPending)
                 .then(() => processQuestionTasks(tabId, gfP2Tasks));
             }
           }
@@ -1094,7 +1139,6 @@ async function runPrescanPipeline(tabId: number, googleFormsFrameId?: number): P
         status: 'done',
         fingerprint,
       });
-      await runQuestionPipeline(tabId, frameId, scanResult.url, scanResult.fields);
       await fillLateProfileMappings(tabId, frameId);
       if (scanResult.mappedFields > 0) {
         chrome.action.setBadgeText({ text: String(scanResult.mappedFields), tabId });
@@ -1116,79 +1160,85 @@ async function runPrescanPipeline(tabId: number, googleFormsFrameId?: number): P
     const aiCandidates = getGoogleFormAICandidates(sanitizedFields, selectorLookup, fallbackSelectors);
     if (aiCandidates.fields.length > 0) {
       console.log(`[JobFill BG] Tab ${tabId}: sending ${aiCandidates.fields.length} unmatched or empty-value fields to AI profile mapping`);
-        try {
-          const aiResponse = await mapFieldsWithAI(aiCandidates.fields, {
-            allowedIntentKeys: ALL_INTENT_KEYS,
-            timeoutMs: 15000,
-          });
+      try {
+        const aiResponse = await mapFieldsWithAI(aiCandidates.fields, {
+          allowedIntentKeys: ALL_INTENT_KEYS,
+          timeoutMs: 15000,
+        });
 
-          const noProfileMatchCandidates: typeof aiCandidates.fields = [];
+        const noProfileMatchCandidates: typeof aiCandidates.fields = [];
 
-          for (const candidate of aiCandidates.fields) {
-            const selector = selectorLookup[candidate.fieldId];
-            if (!selector) continue;
-            const profileField = aiResponse.mappings[candidate.fieldId];
-            const value = profileField && profile ? resolveProfileValue(profile, profileField) : undefined;
-            if (profileField && value?.trim()) {
-              aiMappings.push({ selector, profileField, value, confidence: 0.75 });
-              const field = scanResult.fields.find((item) => item.selector === selector);
-              if (field) {
-                field.profileField = profileField;
-                field.category = 'SAFE_AUTO';
-                field.confidence = 0.75;
-              }
-              continue;
+        for (const candidate of aiCandidates.fields) {
+          const selector = selectorLookup[candidate.fieldId];
+          if (!selector) continue;
+          const profileField = aiResponse.mappings[candidate.fieldId];
+          const value = profileField && profile ? resolveProfileValue(profile, profileField) : undefined;
+          if (profileField && value?.trim()) {
+            aiMappings.push({ selector, profileField, value, confidence: 0.75 });
+            const field = scanResult.fields.find((item) => item.selector === selector);
+            if (field) {
+              field.profileField = profileField;
+              field.category = 'SAFE_AUTO';
+              field.confidence = 0.75;
             }
-
-            // NO_PROFILE_MATCH — AI returned null or profile has no value for this field
-            noProfileMatchCandidates.push(candidate);
+            continue;
           }
 
-          aiMappedCount = aiMappings.length;
-          scanResult.mappedFields = scanResult.fields.filter((f) => f.category === 'SAFE_AUTO').length;
-          scanResult.unknownFields = scanResult.fields.filter((f) => f.category === 'UNKNOWN').length;
-
-          // --- Pipeline 2 dispatch: fire-and-forget for NO_PROFILE_MATCH fields ---
-          if (noProfileMatchCandidates.length > 0) {
-            const p2Tasks: import('../types/questionTask').QuestionTask[] = [];
-            const existingState = await getQuestionState(tabId);
-            const existingSelectors = new Set(existingState?.tasks.map((t) => t.selector) ?? []);
-            const existingCount = existingState?.tasks.length ?? 0;
-
-            for (let i = 0; i < noProfileMatchCandidates.length; i++) {
-              const candidate = noProfileMatchCandidates[i];
-              const selector = selectorLookup[candidate.fieldId];
-              if (!selector || existingSelectors.has(selector)) continue;
-
-              const field = scanResult.fields.find((item) => item.selector === selector);
-              const questionText = [
-                field?.attributes.labelText,
-                field?.attributes.ariaLabel,
-                field?.attributes.placeholder,
-                field?.attributes.helpText,
-              ].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim()
-                || (candidate as { label?: string }).label
-                || 'Unknown field';
-
-              p2Tasks.push({
-                fieldId: `p2_${existingCount + i}`,
-                selector,
-                frameId,
-                question: questionText,
-                type: 'application_question',
-                status: 'RETRIEVING',
-              });
-            }
-
-            if (p2Tasks.length > 0) {
-              console.log(`[JobFill BG] Tab ${tabId}: Pipeline 1 → NO_PROFILE_MATCH for ${p2Tasks.length} fields; dispatching to Pipeline 2 (fire-and-forget)`);
-              void appendQuestionTasks(tabId, scanResult.url, frameId, p2Tasks)
-                .then(() => processQuestionTasks(tabId, p2Tasks));
-            }
-          }
-        } catch (aiErr) {
-          console.warn(`[JobFill BG] Tab ${tabId}: AI profile mapping failed; no Pipeline 2 tasks were started`, aiErr);
+          // NO_PROFILE_MATCH — AI returned null or profile has no value for this field
+          noProfileMatchCandidates.push(candidate);
         }
+
+        aiMappedCount = aiMappings.length;
+        scanResult.mappedFields = scanResult.fields.filter((f) => f.category === 'SAFE_AUTO').length;
+        scanResult.unknownFields = scanResult.fields.filter((f) => f.category === 'UNKNOWN').length;
+
+        // --- Pipeline 2 dispatch: fire-and-forget for NO_PROFILE_MATCH fields ---
+        if (noProfileMatchCandidates.length > 0) {
+          const p2Tasks: import('../types/questionTask').QuestionTask[] = [];
+          const existingState = await getQuestionState(tabId);
+          const existingSelectors = new Set(existingState?.tasks.map((t) => t.selector) ?? []);
+          const existingCount = existingState?.tasks.length ?? 0;
+
+          for (let i = 0; i < noProfileMatchCandidates.length; i++) {
+            const candidate = noProfileMatchCandidates[i];
+            const selector = selectorLookup[candidate.fieldId];
+            if (!selector || existingSelectors.has(selector)) continue;
+
+            const field = scanResult.fields.find((item) => item.selector === selector);
+            const isOtherWriteIn =
+              /^(?:other\s*(?:response|option|answer)?|other:?)$/i.test(field?.attributes.ariaLabel ?? '') ||
+              /^(?:other\s*(?:response|option|answer)?|other:?)$/i.test(field?.attributes.placeholder ?? '') ||
+              /other_option_response/i.test(field?.attributes.name ?? '');
+            if (isOtherWriteIn) continue;
+
+            const questionText = [
+              field?.attributes.labelText,
+              field?.attributes.ariaLabel,
+              field?.attributes.placeholder,
+              field?.attributes.helpText,
+            ].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim()
+              || (candidate as { label?: string }).label
+              || 'Unknown field';
+
+            p2Tasks.push({
+              fieldId: `p2_${existingCount + i}`,
+              selector,
+              frameId,
+              question: questionText,
+              type: 'application_question',
+              status: 'RETRIEVING',
+            });
+          }
+
+          if (p2Tasks.length > 0) {
+            console.log(`[JobFill BG] Tab ${tabId}: Pipeline 1 → NO_PROFILE_MATCH for ${p2Tasks.length} fields; dispatching to Pipeline 2 (fire-and-forget)`);
+            void appendQuestionTasks(tabId, scanResult.url, frameId, p2Tasks)
+              .then(() => processQuestionTasks(tabId, p2Tasks));
+          }
+        }
+      } catch (aiErr) {
+        console.warn(`[JobFill BG] Tab ${tabId}: AI profile mapping failed; no Pipeline 2 tasks were started`, aiErr);
+      }
     }
 
     // Step 5: Cache AI results by fingerprint so future visits are instant

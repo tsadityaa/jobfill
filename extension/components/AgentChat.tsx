@@ -7,6 +7,7 @@ import { uploadToPdfCo, compressPdf, pdfToImages, downloadResult } from '../util
 import { renderMarkdown } from '../utils/markdownRenderer';
 import { getCurrentUser } from '../utils/supabase';
 import { searchMemory } from '../utils/memory';
+import { requestOpenRouter } from '../utils/backendClient';
 
 interface AgentChatProps {
   profile: UserProfile;
@@ -16,8 +17,6 @@ interface Message {
   role: 'user' | 'assistant';
   content: string;
 }
-
-const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
 
 function buildSystemPrompt(profile: UserProfile, documents: StoredDocument[], memoryResults: string[]): string {
   // Build a plain-text profile summary for the agent context
@@ -225,33 +224,12 @@ export default function AgentChat({ profile }: AgentChatProps) {
     }
 
     try {
-      const apiKey = import.meta.env.VITE_OPENROUTER_API_KEY;
-      if (!apiKey || apiKey === 'xyzz') {
-        setMessages((prev) => [
-          ...prev,
-          {
-            role: 'assistant',
-            content: '⚠️ No API key configured. Please add `VITE_OPENROUTER_API_KEY` to your `.env` file and rebuild the extension.',
-          },
-        ]);
-        return;
-      }
-
       const systemPrompt = buildSystemPrompt(profile, documents, memoryResults);
 
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 30000);
 
-      const response = await fetch(OPENROUTER_API_URL, {
-        method: 'POST',
-        signal: controller.signal,
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey}`,
-          'HTTP-Referer': 'http://localhost:3000',
-          'X-Title': 'Personal Copilot Extension',
-        },
-        body: JSON.stringify({
+      const response = await requestOpenRouter({
           model: 'openai/gpt-4o-mini',
           messages: [
             { role: 'system', content: systemPrompt },
@@ -259,8 +237,7 @@ export default function AgentChat({ profile }: AgentChatProps) {
           ],
           temperature: 0.7,
           max_tokens: 1024,
-        }),
-      });
+        }, controller.signal);
 
       clearTimeout(timeoutId);
 

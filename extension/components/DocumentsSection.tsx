@@ -1,5 +1,4 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import type { StoredDocument, DocumentCategory } from '../types/document';
 import type { StoredDocument, DocumentCategory, DocumentType } from '../types/document';
 import {
   CATEGORY_LABELS,

@@ -23,6 +23,12 @@ export function getApplicationQuestionText(field: Pick<DetectedField, 'attribute
 export function isApplicationQuestionCandidate(
   field: Pick<DetectedField, 'tagName' | 'inputType' | 'attributes'>,
 ): boolean {
+  const isOtherChoiceInput =
+    /^(?:other\s*(?:response|option|answer)?|other:?)$/i.test(field.attributes.ariaLabel ?? '')
+    || /^(?:other\s*(?:response|option|answer)?|other:?)$/i.test(field.attributes.placeholder ?? '')
+    || /other_option_response/i.test(field.attributes.name ?? '');
+  if (isOtherChoiceInput) return false;
+
   const isTextarea = field.tagName.toLowerCase() === 'textarea' || field.inputType.toLowerCase() === 'textarea';
   if (isTextarea) return true;
   if (!TEXT_INPUT_TYPES.has(field.inputType.toLowerCase())) return false;

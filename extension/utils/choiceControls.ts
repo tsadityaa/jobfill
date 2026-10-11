@@ -1,4 +1,5 @@
 import { getElementBySelector, getLabelText, getUniqueSelector, queryAcrossOpenShadowRoots } from './fieldDetector';
+import { fillQuestionAnswer } from './formFiller';
 import type { ChoiceControl, ChoiceDecision, ChoiceFormAnswer, ChoiceOption } from '../types/choice';
 
 const GROUP_SELECTOR = 'fieldset, [role="radiogroup"], [role="group"]';
@@ -337,9 +338,9 @@ function triggerReactCheckChange(el: HTMLInputElement): boolean {
         type: 'change',
         nativeEvent: new Event('change', { bubbles: true }),
         bubbles: true,
-        preventDefault: () => {},
-        stopPropagation: () => {},
-        persist: () => {},
+        preventDefault: () => { },
+        stopPropagation: () => { },
+        persist: () => { },
       };
       try {
         onChange(syntheticEvent);
@@ -356,9 +357,9 @@ function triggerReactCheckChange(el: HTMLInputElement): boolean {
         type: 'click',
         nativeEvent: new MouseEvent('click', { bubbles: true }),
         bubbles: true,
-        preventDefault: () => {},
-        stopPropagation: () => {},
-        persist: () => {},
+        preventDefault: () => { },
+        stopPropagation: () => { },
+        persist: () => { },
       };
       try {
         onClick(syntheticClick);
@@ -489,6 +490,18 @@ async function waitForCheckedState(element: HTMLElement, expected: boolean, time
   return false;
 }
 
+function findOtherResponseField(optionElement: HTMLElement): HTMLInputElement | HTMLTextAreaElement | null {
+  let container: HTMLElement | null = optionElement.closest('label') ?? optionElement;
+  for (let depth = 0; container && depth < 5; depth++, container = container.parentElement) {
+    const fields = Array.from(container.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>(
+      'input:not([type]), input[type="text"], input[type="search"], textarea',
+    )).filter((field) => isRendered(field) && !field.disabled && !field.readOnly);
+    const radioOptions = container.querySelectorAll('input[type="radio"], [role="radio"]');
+    if (fields.length === 1 && radioOptions.length <= 1) return fields[0];
+  }
+  return null;
+}
+
 export async function applyChoiceDecisions(decisions: ChoiceDecision[]): Promise<{ applied: string[]; unresolved: string[] }> {
   const controls = await scanChoiceControls();
   const controlsById = new Map(controls.map((control) => [control.id, control]));
@@ -549,74 +562,89 @@ export async function applyChoiceDecisions(decisions: ChoiceDecision[]): Promise
 
     let success = true;
     let failureReason = 'selection-not-verified';
-      for (const option of selectedOptions) {
-        const element = option.selector ? getElementBySelector(option.selector) : null;
-        if (!(element instanceof HTMLElement)) {
-          failureReason = `option-selector-did-not-resolve:${option.id}`;
-          success = false;
-          break;
-        }
-        const checked = element instanceof HTMLInputElement
-          ? element.checked
-          : element.getAttribute('aria-checked') === 'true';
-        console.info('[JobFill Choice] applying group option', {
-          controlId: control.id,
-          kind: control.kind,
-          question: control.question,
-          option: option.label,
-          selector: option.selector,
-          alreadyChecked: checked,
-          role: element.getAttribute('role'),
-          tag: element.tagName,
-        });
-        if (!checked) {
-          if (element instanceof HTMLInputElement) {
-            // Use the robust multi-strategy click for native radio/checkbox inputs.
-            // Handles React controlled components (Meta/Facebook), plain HTML, and
-            // other framework-managed inputs that ignore bare .click().
-            await clickCheckableInput(element, control.id, option.label);
-          } else {
-            // Use the full pointer/mouse event sequence for ARIA role-based
-            // widgets (Google Forms, Material Design) that ignore bare .click().
-            simulateFullClick(element);
+    for (const option of selectedOptions) {
+      const element = option.selector ? getElementBySelector(option.selector) : null;
+      if (!(element instanceof HTMLElement)) {
+        failureReason = `option-selector-did-not-resolve:${option.id}`;
+        success = false;
+        break;
+      }
+      const checked = element instanceof HTMLInputElement
+        ? element.checked
+        : element.getAttribute('aria-checked') === 'true';
+      console.info('[JobFill Choice] applying group option', {
+        controlId: control.id,
+        kind: control.kind,
+        question: control.question,
+        option: option.label,
+        selector: option.selector,
+        alreadyChecked: checked,
+        role: element.getAttribute('role'),
+        tag: element.tagName,
+      });
+      if (!checked) {
+        if (element instanceof HTMLInputElement) {
+          // Use the robust multi-strategy click for native radio/checkbox inputs.
+          // Handles React controlled components (Meta/Facebook), plain HTML, and
+          // other framework-managed inputs that ignore bare .click().
+          await clickCheckableInput(element, control.id, option.label);
+        } else {
+          // Use the full pointer/mouse event sequence for ARIA role-based
+          // widgets (Google Forms, Material Design) that ignore bare .click().
+          simulateFullClick(element);
 
-            // If the state didn't change, try clicking the parent label container.
-            // Google Forms sometimes routes the handler through a wrapper div.
-            const firstClickWorked = await waitForCheckedState(element, true, 400);
-            if (!firstClickWorked) {
-              const wrapper = element.closest('[role="radio"], [role="checkbox"]') !== element
-                ? null
-                : element.parentElement;
-              if (wrapper && wrapper instanceof HTMLElement) {
-                console.warn('[JobFill Choice] first click did not change checked state; trying parent wrapper', {
-                  controlId: control.id,
-                  option: option.label,
-                  role: element.getAttribute('role'),
-                  ariaChecked: element.getAttribute('aria-checked'),
-                });
-                simulateFullClick(wrapper);
-              } else {
-                console.warn('[JobFill Choice] first click did not change checked state and no wrapper was available', {
-                  controlId: control.id,
-                  option: option.label,
-                  role: element.getAttribute('role'),
-                  ariaChecked: element.getAttribute('aria-checked'),
-                });
-              }
+          // If the state didn't change, try clicking the parent label container.
+          // Google Forms sometimes routes the handler through a wrapper div.
+          const firstClickWorked = await waitForCheckedState(element, true, 400);
+          if (!firstClickWorked) {
+            const wrapper = element.closest('[role="radio"], [role="checkbox"]') !== element
+              ? null
+              : element.parentElement;
+            if (wrapper && wrapper instanceof HTMLElement) {
+              console.warn('[JobFill Choice] first click did not change checked state; trying parent wrapper', {
+                controlId: control.id,
+                option: option.label,
+                role: element.getAttribute('role'),
+                ariaChecked: element.getAttribute('aria-checked'),
+              });
+              simulateFullClick(wrapper);
+            } else {
+              console.warn('[JobFill Choice] first click did not change checked state and no wrapper was available', {
+                controlId: control.id,
+                option: option.label,
+                role: element.getAttribute('role'),
+                ariaChecked: element.getAttribute('aria-checked'),
+              });
             }
           }
         }
-        const verified = await waitForCheckedState(element, true);
-        console.info('[JobFill Choice] group option verification', {
+      }
+      const verified = await waitForCheckedState(element, true);
+      console.info('[JobFill Choice] group option verification', {
+        controlId: control.id,
+        option: option.label,
+        verified,
+        checked: element instanceof HTMLInputElement ? element.checked : element.getAttribute('aria-checked'),
+      });
+      if (!verified) {
+        failureReason = `checked-state-not-confirmed:${option.id}`;
+        success = false;
+      }
+    }
+
+    const otherOption = selectedOptions.find((option) => /^other\b/i.test(normalizeText(option.label)));
+    if (success && otherOption && decision.otherText?.trim()) {
+      const optionElement = otherOption.selector ? getElementBySelector(otherOption.selector) : null;
+      const responseField = optionElement instanceof HTMLElement ? findOtherResponseField(optionElement) : null;
+      if (responseField && !fillQuestionAnswer(responseField, decision.otherText)) {
+        failureReason = 'other-response-field-not-filled';
+        success = false;
+      } else if (!responseField) {
+        console.warn('[JobFill Choice] Other selected but no associated text field was found', {
           controlId: control.id,
-          option: option.label,
-          verified,
-          checked: element instanceof HTMLInputElement ? element.checked : element.getAttribute('aria-checked'),
+          option: otherOption.label,
         });
-        if (!verified) {
-          failureReason = `checked-state-not-confirmed:${option.id}`;
-          success = false;
-        }
+      }
     }
 
     if (success) {

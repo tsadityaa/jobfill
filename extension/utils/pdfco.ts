@@ -1,3 +1,5 @@
+import { requestPdfCo, uploadPdfToBackend } from './backendClient';
+
 // ============================================================
 // PDF.co API Client — Multi-key fallback pool
 // ============================================================
@@ -5,19 +7,13 @@
 // Upload uses multipart POST /file/upload (returns a stable URL).
 // ============================================================
 
-const BUILT_IN_KEYS: string[] = [
-  import.meta.env.VITE_PDFCO_API_KEY ?? '',
-  // Add more fallback keys here:
-  // 'friend@gmail.com_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX',
-].filter(Boolean);
-
 async function getAllKeys(): Promise<string[]> {
   try {
     const res = await chrome.storage.local.get('pdfco_extra_keys');
     const extra: string[] = res['pdfco_extra_keys'] ?? [];
-    return [...BUILT_IN_KEYS, ...extra];
+    return extra;
   } catch {
-    return BUILT_IN_KEYS;
+    return [];
   }
 }
 
@@ -50,8 +46,14 @@ async function callApi(
   keyIndex = 0,
 ): Promise<Record<string, unknown>> {
   const keys = await getAllKeys();
-  if (keys.length === 0) throw new Error('No PDF.co API key configured. Add one in the ⚙️ Keys tab.');
-  if (keyIndex >= keys.length) throw new Error('All PDF.co API keys exhausted. Please add more keys in the ⚙️ Keys tab.');
+  if (keyIndex >= keys.length) {
+    const response = await requestPdfCo(endpoint, { ...body, async: false });
+    const data = await response.json() as Record<string, unknown>;
+    if (!response.ok || data.error === true) {
+      throw new Error(String(data.message ?? `PDF.co request failed (${response.status}).`));
+    }
+    return data;
+  }
 
   const res = await fetch(`${BASE}${endpoint}`, {
     method: 'POST',
@@ -85,20 +87,27 @@ async function callApi(
 
 export async function uploadToPdfCo(blob: Blob, filename: string): Promise<string> {
   const keys = await getAllKeys();
-  if (keys.length === 0) throw new Error('No PDF.co API key configured.');
+  for (const key of keys) {
+    const form = new FormData();
+    form.append('file', blob, filename);
+    const response = await fetch(`${BASE}/file/upload`, {
+      method: 'POST',
+      headers: { 'x-api-key': key },
+      body: form,
+    });
+    const data = await response.json() as { url?: string; error?: boolean; message?: string };
+    if (response.ok && !data.error && data.url) return data.url;
+    if (response.status !== 402 && !String(data.message ?? '').toLowerCase().includes('credit')) {
+      throw new Error(data.message ?? 'Upload to PDF.co failed');
+    }
+  }
 
   const form = new FormData();
   form.append('file', blob, filename);
-
-  const res = await fetch(`${BASE}/file/upload`, {
-    method: 'POST',
-    headers: { 'x-api-key': keys[0] },
-    body: form,
-  });
-
-  const data = await res.json() as { url?: string; error?: boolean; message?: string };
-  if (data.error || !data.url) {
-    throw new Error(data.message ?? 'Upload to PDF.co failed');
+  const response = await uploadPdfToBackend(form);
+  const data = await response.json() as { url?: string; error?: boolean; message?: string };
+  if (!response.ok || data.error || !data.url) {
+    throw new Error(data.message ?? `Upload to PDF.co failed (${response.status}).`);
   }
   return data.url;
 }

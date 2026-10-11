@@ -1,5 +1,6 @@
 import type { DocumentType, StoredDocument } from '../types/document';
 import { inferDocumentType } from '../types/document';
+import { requestOpenRouter } from './backendClient';
 
 const DOCUMENT_TYPES: DocumentType[] = [
   'resume',
@@ -30,20 +31,8 @@ export async function classifyDocumentField(label: string, accept = ''): Promise
   const deterministicType = classifyDocumentFieldDeterministically(label);
   if (deterministicType) return deterministicType;
 
-  const apiKey = import.meta.env.VITE_OPENROUTER_API_KEY;
-  if (!apiKey || apiKey === 'xyzz') return null;
-
   try {
-    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      signal: AbortSignal.timeout(8000),
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
-        'HTTP-Referer': 'http://localhost:3000',
-        'X-Title': 'Personal Copilot Extension',
-      },
-      body: JSON.stringify({
+    const response = await requestOpenRouter({
         model: 'openai/gpt-4o-mini',
         temperature: 0,
         response_format: { type: 'json_object' },
@@ -54,8 +43,7 @@ export async function classifyDocumentField(label: string, accept = ''): Promise
           },
           { role: 'user', content: JSON.stringify({ fieldLabel: label, acceptedFileTypes: accept }) },
         ],
-      }),
-    });
+      }, AbortSignal.timeout(8000));
     if (!response.ok) return null;
     const data = await response.json();
     const text = data?.choices?.[0]?.message?.content;

@@ -11,6 +11,9 @@ output/
 .env
 .env.local
 .env.*.local
+backend/.dev.vars
+backend/.dev.vars.*
+!backend/.dev.vars.example
 
 # IDE
 .vscode/

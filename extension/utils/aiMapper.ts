@@ -9,8 +9,7 @@
 import type { ProfileFieldKey } from '../types/autofill';
 import { ALL_INTENT_KEYS } from '../types/aiMapper';
 import type { SanitizedField, GoogleFormLabelField, AIMappingResponse } from '../types/aiMapper';
-
-const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
+import { isBackendConfigured, requestOpenRouter } from './backendClient';
 
 const SYSTEM_PROMPT = `You are a form field classifier for job application websites.
 
@@ -55,10 +54,8 @@ export async function mapFieldsWithAI(
   fields: Array<SanitizedField | GoogleFormLabelField>,
   options: AIMapperOptions = {},
 ): Promise<AIMappingResponse> {
-  const apiKey = import.meta.env.VITE_OPENROUTER_API_KEY;
-
-  if (!apiKey || apiKey === 'xyzz') {
-    console.warn('[AI Mapper] No valid API key configured');
+  if (!isBackendConfigured()) {
+    console.warn('[AI Mapper] JobFill backend URL is not configured');
     return { mappings: {}, completed: false };
   }
 
@@ -77,16 +74,7 @@ export async function mapFieldsWithAI(
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), options.timeoutMs ?? 15000);
 
-    const response = await fetch(OPENROUTER_API_URL, {
-      method: 'POST',
-      signal: controller.signal,
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
-        'HTTP-Referer': 'http://localhost:3000', // Required by OpenRouter
-        'X-Title': 'Personal Copilot Extension', // Required by OpenRouter
-      },
-      body: JSON.stringify({
+    const response = await requestOpenRouter({
         model: model,
         messages: [
           { role: 'system', content: options.googleForm ? GOOGLE_FORM_SYSTEM_PROMPT : SYSTEM_PROMPT },
@@ -95,8 +83,7 @@ export async function mapFieldsWithAI(
         temperature: 0.1, // Low temperature for accuracy
         max_tokens: 600,
         response_format: { type: 'json_object' } // Force JSON output if supported
-      }),
-    });
+      }, controller.signal);
 
     if (!response.ok) {
       clearTimeout(timeoutId);

@@ -1,10 +1,10 @@
 import type { UserProfile } from '../types/profile';
 import type { ChoiceControl, ChoiceDecision, ChoiceEvidence, ChoiceOption } from '../types/choice';
+import { isBackendConfigured, requestOpenRouter } from './backendClient';
 
-const CHOICE_CACHE_KEY = 'jf_choice_decisions_v6';
+const CHOICE_CACHE_KEY = 'jf_choice_decisions_v8';
 const CHOICE_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const MAX_CACHED_CHOICES = 80;
-const CHOICE_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
 
 interface ChoiceCacheEntry {
   decision: ChoiceDecision;
@@ -248,6 +248,8 @@ function resolveFromProfile(control: ChoiceControl, facts: string[], profile: Us
     });
     const yes = employerMatchesQuestion ? findPolarity(options, true) : undefined;
     if (yes) return { controlId: control.id, selectedOptionIds: [yes.id], confidence: 0.97, source: 'profile' };
+    const no = !employerMatchesQuestion ? findPolarity(options, false) : undefined;
+    if (no) return { controlId: control.id, selectedOptionIds: [no.id], confidence: 0.95, source: 'profile' };
   }
 
   if (isCurrentEmploymentQuestion && profile.experience.some((item) => item.current && (item.company || item.title))) {
@@ -285,15 +287,45 @@ export function resolveChoiceFromProfile(control: ChoiceControl, profile: UserPr
 }
 
 export function resolveOptimisticJobAvailability(control: ChoiceControl, evidence: string[]): ChoiceDecision | null {
-  if (control.multiple) return null;
   const question = normalize(control.question);
-  
+
+  // Standalone agreement/certification/consent/opt-in checkboxes:
+  if (control.kind === 'checkbox' && control.options.length === 1 && !control.options[0].disabled) {
+    const combined = normalize(`${control.question} ${control.options[0].label}`);
+    const isAgreementOrConsent = /\b(?:certif(?:y|ication)|true and accurate|truthful|truthfulness|disqualification|terms|condition|privacy|policy|consent|agree|accept|acknowledge|declaration|background check|keep me informed|personalized emails|employment opportunities|talent community|communication)\b/.test(combined);
+    if (isAgreementOrConsent) {
+      return {
+        controlId: control.id,
+        selectedOptionIds: [control.options[0].id],
+        confidence: 0.95,
+        source: 'user_preference',
+      };
+    }
+  }
+
+  if (control.multiple) return null;
+
   // Job qualification / screening questions:
   // 1. Relocation, onsite, hybrid, facility, commute, shift
   // 2. Available, availability, immediate, joining, start date, internship duration, full-time commitment
   // 3. Work authorization, legally authorized, eligible to work, 18 years+, background check, drug test
   // 4. Agreement, terms, declaration, truthfulness
   const isScreening = /\b(?:available|availability|immediate|immediately|joining|join|start|onsite|on site|internship|relocat(?:e|ion)|hybrid|in person|commute|shift|overtime|facility|legally authorized|work authorization|authorized to work|eligible to work|right to work|18 years|background check|drug (?:screen|test)|declaration|certif(?:y|ication)|agree|truthful|statement is accurate)\b/.test(question);
+
+  // Past employer check fallback:
+  if (!isScreening && /\b(?:employed by|worked at|worked for|previous employee|former employee)\b/.test(question)
+    && /\b(?:past|previous|previously|before|ever)\b/.test(question)) {
+    const no = findPolarity(control.options, false);
+    if (no) {
+      return {
+        controlId: control.id,
+        selectedOptionIds: [no.id],
+        confidence: 0.93,
+        source: 'user_preference',
+      };
+    }
+  }
+
   if (!isScreening) return null;
 
   const yes = findPolarity(control.options, true);
@@ -425,10 +457,9 @@ export interface AIChoiceRequest {
 }
 
 export async function resolveChoicesWithAI(requests: AIChoiceRequest[]): Promise<ChoiceDecision[]> {
-  const apiKey = import.meta.env.VITE_OPENROUTER_API_KEY;
-  if (!apiKey || apiKey === 'xyzz' || !requests.length) {
+  if (!isBackendConfigured() || !requests.length) {
     console.warn('[JobFill Choice AI] skipping AI resolver:', {
-      reason: !apiKey ? 'no API key' : apiKey === 'xyzz' ? 'placeholder API key' : 'no requests',
+      reason: !isBackendConfigured() ? 'backend URL is not configured' : 'no requests',
       requestCount: requests.length,
     });
     return [];
@@ -449,25 +480,23 @@ export async function resolveChoicesWithAI(requests: AIChoiceRequest[]): Promise
   })));
 
   try {
-    const response = await fetch(CHOICE_API_URL, {
-      method: 'POST',
-      signal: AbortSignal.timeout(15000),
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
-        'HTTP-Referer': 'http://localhost:3000',
-        'X-Title': 'Personal Copilot Extension',
-      },
-      body: JSON.stringify({
-        model: 'openai/gpt-4o-mini',
-        temperature: 0,
-        max_tokens: 1500,
-        response_format: { type: 'json_object' },
-        messages: [
-          {
-            role: 'system',
-            content: `You are an expert AI job-application assistant that accurately selects the right choices (radio buttons, checkboxes) for job application forms on behalf of the applicant.
+    const response = await requestOpenRouter({
+      model: 'openai/gpt-4o-mini',
+      temperature: 0,
+      max_tokens: 1500,
+      response_format: { type: 'json_object' },
+      messages: [
+        {
+          role: 'system',
+          content: `You are an expert AI job-application assistant that accurately selects the right choices (radio buttons, checkboxes) for job application forms on behalf of the applicant.
 Analyze the applicant's profile facts, relevant retrieved memories from Supermemory, and answers from the same form.
+
+Evidence priority (follow this order):
+- The current profile_evidence is the source of truth for saved facts. When it contains an answer, use it.
+- relevant_memories may be stale. Use them only when the current profile does not contain the fact; if they conflict with profile_evidence, profile_evidence wins.
+- relevant_form_answers are useful only when they explicitly answer the same question and do not conflict with the current profile.
+- The options list contains possible responses, not evidence about the applicant. Never infer a personal fact from an option being listed or from what seems likely.
+- For factual questions, prefer an exact supported answer. If no listed option matches it and "Other" exists, select "Other" and put the exact supported answer in "other_text". Never substitute a plausible listed value.
 
 CRITICAL DECISION-MAKING GUIDELINES:
 
@@ -477,6 +506,10 @@ CRITICAL DECISION-MAKING GUIDELINES:
 - If the applicant is a student without active employment, select "Student".
 - If self-employed, select "Self-employed".
 - If unemployed, select "Unemployed".
+- For questions asking about past employment with a specific company (e.g. "Have you been employed by Adobe in the past?", "Have you ever worked at Adobe before?", "Are you a former employee of Adobe?"):
+  * Check the applicant's experience facts, history, and Supermemory chunks.
+  * If the company appears in the applicant's work history, select "Yes".
+  * If the applicant has NEVER worked for that company, select "No".
 - For questions asking about years of experience, current employer, job title, or previous companies worked at, strictly match against the profile facts and memories.
 
 2. Highest Education Level & Degrees:
@@ -505,34 +538,49 @@ CRITICAL DECISION-MAKING GUIDELINES:
   * Commitment to internship or program duration (e.g. 6 months) -> Select "Yes"
   * Legal authorization to work in the country -> Select "Yes"
   * Passing background check / drug test -> Select "Yes"
-  * Agreement to terms and truthfulness of application -> Select "Yes"
+  * Agreement to terms, policies, certifications, and truthfulness of application -> Select "Yes" or CHECK the box
+  * Consent to background checks, fraud prevention, and applicant data processing -> Select "Yes" or CHECK the box
+  * Certifications that provided information is true, accurate, and complete -> Select "Yes" or CHECK the box
+  * Opting in to receive emails / updates about employment opportunities or talent community -> Select "Yes" or CHECK the box
   * Requiring visa sponsorship -> Select "No" (unless explicit profile/memory evidence says the applicant needs sponsorship).
 - NEVER pick a disqualifying negative answer ("No") to screening questions unless supplied profile/memory evidence explicitly demands it.
+- For standalone single checkboxes (agreements, acknowledgements, certifications, privacy policies, consent, job alerts): ALWAYS return the checkbox option ID in "selected_option_ids" so the box gets checked.
+
+Selective Programs, Fellowships, and Certifications (e.g. Google Summer of Code, GirlScript, MLH, hackathons):
+- ONLY select specific programs if they are EXPLICITLY confirmed in the applicant's profile facts, resume, or Supermemory chunks.
+- NEVER invent or guess participation in selective programs or fellowships.
+- If the applicant has NOT participated in any of the listed programs, select "Not really", "None", or "None of the above".
+- NEVER select both positive program options and a negative option ("Not really", "None", "No") together!
 
 5. Dynamic Question Understanding:
 - For any novel, arbitrary, or company-specific questions (e.g. "Have you ever worked at IBM before?", "Do you have experience with Python?", "How did you hear about us?"):
-  * Reason carefully over the profile facts, work history, skills, and Supermemory chunks.
-  * Pick the option that best accurately reflects the applicant's history and maximizes their candidacy.
+  * Reason carefully over the profile facts, work history, skills, and relevant Supermemory chunks.
+  * Pick only the option supported by the evidence, prioritizing the current profile over memory and accuracy over maximizing candidacy.
+- If none of the listed options accurately matches the supplied evidence and an "Other" option is available, select "Other" instead of the closest incorrect option. Return the concise, evidence-backed answer for its text field in "other_text"; do not invent details.
+- For graduation-year questions, use the graduation/end year shown in the profile evidence. If that year is not listed, select "Other" and put the four-digit year in "other_text".
 
 6. Output Format & Constraints:
 - You must return ONLY options from the provided "options" list using their exact "id".
 - For single-choice ("multiple": false, or radio buttons): select EXACTLY ONE option ID that is the best match.
-- For multi-choice ("multiple": true, or checkboxes): select all matching option IDs.
-- Return strictly JSON: {"results":[{"control_id":"...","selected_option_ids":["..."],"confidence":0.95}]}. Use confidence from 0 to 1.`,
-          },
-          { role: 'user', content: JSON.stringify({ controls: available.map(({ control, evidence }) => ({
-            control_id: control.id,
-            type: control.kind,
-            question: control.question,
-            multiple: control.multiple,
-            options: control.options.filter((option) => !option.disabled).map(({ id, label }) => ({ id, label })),
-            profile_evidence: evidence.profileFacts,
-            relevant_memories: evidence.memories,
-            relevant_form_answers: evidence.formAnswers,
-          })) }) },
-        ],
-      }),
-    });
+- For multi-choice ("multiple": true, or checkboxes): select all matching option IDs. For standalone checkboxes (e.g. consent, certification), include the option ID so it gets checked.
+- Return strictly JSON: {"results":[{"control_id":"...","selected_option_ids":["..."],"confidence":0.95,"other_text":"..."}]}. Include "other_text" only when selecting "Other" and the supplied evidence supports a text answer. Use confidence from 0 to 1.`,
+        },
+        {
+          role: 'user', content: JSON.stringify({
+            controls: available.map(({ control, evidence }) => ({
+              control_id: control.id,
+              type: control.kind,
+              question: control.question,
+              multiple: control.multiple,
+              options: control.options.filter((option) => !option.disabled).map(({ id, label }) => ({ id, label })),
+              profile_evidence: evidence.profileFacts,
+              relevant_memories: evidence.memories,
+              relevant_form_answers: evidence.formAnswers,
+            }))
+          })
+        },
+      ],
+    }, AbortSignal.timeout(15000));
     if (!response.ok) {
       console.warn(`[JobFill Choice AI] API returned HTTP ${response.status}: ${response.statusText}`);
       return [];
@@ -545,7 +593,7 @@ CRITICAL DECISION-MAKING GUIDELINES:
     }
     console.info('[JobFill Choice AI] raw AI response content:', content);
     const parsed = JSON.parse(content.replace(/^```(?:json)?\s*|\s*```$/g, '')) as {
-      results?: Array<{ control_id?: string; selected_option_ids?: string[]; confidence?: number }>;
+      results?: Array<{ control_id?: string; selected_option_ids?: string[]; confidence?: number; other_text?: string }>;
     };
     console.info('[JobFill Choice AI] parsed AI results:', parsed.results);
     const requestsById = new Map(available.map((request) => [request.control.id, request]));
@@ -586,9 +634,31 @@ CRITICAL DECISION-MAKING GUIDELINES:
         return [];
       }
 
-      const finalSelectedIds = request.control.multiple ? selectedIds : [selectedIds[0]];
-      console.info(`[JobFill Choice AI] ✓ accepted result for ${result.control_id}`, { selectedOptionIds: finalSelectedIds, confidence });
-      return [{ controlId: request.control.id, selectedOptionIds: finalSelectedIds, confidence, source: 'ai' as const }];
+      let finalSelectedIds = request.control.multiple ? selectedIds : [selectedIds[0]];
+      if (request.control.multiple && finalSelectedIds.length > 1) {
+        const negativeOption = enabledOptions.find((opt) =>
+          /^(?:not really|none|none of the above|neither|n\/a|not applicable|no,?\s+none)$/i.test(opt.label.trim())
+        );
+        if (negativeOption && finalSelectedIds.includes(negativeOption.id)) {
+          finalSelectedIds = [negativeOption.id];
+        }
+      }
+      const selectedOther = finalSelectedIds.some((id) => enabledOptions.some((option) =>
+        option.id === id && /^other\b/i.test(normalize(option.label)),
+      ));
+      const otherText = selectedOther && typeof result.other_text === 'string' ? result.other_text.trim().slice(0, 600) : '';
+      console.info(`[JobFill Choice AI] ✓ accepted result for ${result.control_id}`, {
+        selectedOptionIds: finalSelectedIds,
+        confidence,
+        hasOtherText: Boolean(otherText),
+      });
+      return [{
+        controlId: request.control.id,
+        selectedOptionIds: finalSelectedIds,
+        confidence,
+        source: 'ai' as const,
+        ...(otherText ? { otherText } : {}),
+      }];
     });
   } catch (error) {
     console.warn('[JobFill Choice AI] Batched AI resolution failed:', error);

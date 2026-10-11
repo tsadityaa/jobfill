@@ -63,6 +63,7 @@ export async function appendQuestionTasks(
   url: string,
   frameId: number,
   newTasks: QuestionTask[],
+  forceAutofillRequested = false,
 ): Promise<void> {
   return mutateStore((store) => {
     const existing = store[tabId];
@@ -71,8 +72,17 @@ export async function appendQuestionTasks(
       const existingSelectors = new Set(existing.tasks.map((t) => t.selector));
       const unique = newTasks.filter((t) => !existingSelectors.has(t.selector));
       existing.tasks = [...existing.tasks, ...unique];
+      if (forceAutofillRequested) {
+        existing.autofillRequested = true;
+      }
     } else {
-      store[tabId] = { tabId, url, frameId, autofillRequested: false, tasks: newTasks };
+      store[tabId] = {
+        tabId,
+        url,
+        frameId,
+        autofillRequested: forceAutofillRequested,
+        tasks: newTasks,
+      };
     }
   });
 }
