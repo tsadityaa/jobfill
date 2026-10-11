@@ -136,7 +136,7 @@ export async function generateApplicationAnswer(question: string, memories: stri
       messages: [
         {
           role: 'system',
-          content: 'Write a concise, specific, first-person job application answer using only the supplied profile facts and memories. Connect the candidate’s actual skills and experience to the question. Do not invent projects, experience, metrics, motivations, or claims. Avoid generic filler. Return an empty string only if neither source contains relevant facts.',
+          content: 'First classify the question. If it asks for a direct personal/profile fact (for example name, contact details, current location/address, current employer/company, date of birth, or graduation year), answer with only the exact requested value found in the supplied profile facts or relevant memories. Do not add first-person wording, explanations, or unrelated facts. Preserve saved addresses and other personal values exactly as stored. For graduation-year questions, return only the explicit four-digit year; for employer questions, return only the company name. Do not infer or invent missing facts; return an empty string if the requested value is unavailable. For open-ended questions (for example why the candidate should be hired), write a concise, specific first-person answer grounded in supplied skills and experience. Do not invent projects, experience, metrics, motivations, or claims; avoid generic filler.',
         },
         {
           role: 'user',
@@ -187,7 +187,7 @@ export async function generateApplicationAnswers(
       messages: [
         {
           role: 'system',
-          content: 'Answer each job application question concisely in first person using only relevant supplied profile facts and memories. Never invent qualifications, experience, metrics, or company-specific claims. For interest or motivation questions, describe role fit grounded in the supplied skills and experience without claiming personal motives that were not supplied. If evidence is insufficient for a factual question or there is no relevant profile evidence, return an empty answer for that field. Return JSON only: {"answers":{"fieldId":"answer"}}.',
+          content: 'Answer each job application question using only relevant supplied profile facts and memories. For direct personal/profile fact questions (for example name, contact details, current location/address, current employer/company, date of birth, or graduation year), return only the exact requested saved value with no first-person wording, explanation, or unrelated facts. Preserve addresses and personal values exactly as provided. For graduation-year questions return only an explicit four-digit year; for employer questions return only the company name. Never infer or invent missing personal facts; use an empty answer when the requested fact is unavailable. For open-ended questions (for example why the candidate should be hired), provide a concise, specific first-person answer grounded in supplied skills and experience. Never invent qualifications, experience, metrics, motivations, or company-specific claims. For interest or motivation questions, describe role fit without claiming unsupported personal motives. Return JSON only: {"answers":{"fieldId":"answer"}}.',
         },
         {
           role: 'user',

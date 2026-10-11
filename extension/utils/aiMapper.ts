@@ -25,8 +25,11 @@ Rules:
 6. Common tricky cases:
    - "number" or "contact" with type "tel" → phones.primary
    - "entry.XXXXX" fields (Google Forms) → look at the label text
-   - "name" alone (no first/last) → personal.fullName
+  - A field labeled only "Name", with no first-name or last-name qualifier → personal.fullName
+  - A "Name" field with a hint like "First and last name" → personal.fullName
    - "university" or "college" → education.latest.institution
+  - Expected date of joining or expected start date → application.expectedJoiningDate
+  - Keep date of birth, education dates, employment dates, and expected joining date distinct.
 
 Respond with ONLY valid JSON, no markdown, no explanation:
 {
@@ -43,7 +46,7 @@ export interface AIMapperOptions {
   timeoutMs?: number;
 }
 
-const GOOGLE_FORM_SYSTEM_PROMPT = `Classify each supplied unknown Google Forms field label against the supplied canonical profile intent keys and optional intent descriptions. Infer the best match from the label's meaning, including abbreviations and synonyms. Return only a supplied intent key or null for each fieldId. Return null when a label has no matching profile variable or asks for a preference, job choice, consent, upload, password, OTP, legal declaration, or demographic answer. Never invent values or return placeholder text. Respond only with JSON: {"mappings":{"f0":null}}.`;
+const GOOGLE_FORM_SYSTEM_PROMPT = `Classify each supplied unknown Google Forms field label against the supplied canonical profile intent keys and optional intent descriptions. Infer the best match from the label's meaning, including abbreviations and synonyms. Map a field labeled only "Name", with no first-name or last-name qualifier, to personal.fullName. Map a field labeled "Name" with a hint like "First and last name" to personal.fullName, not personal.firstName. Map explicit first-name and last-name fields to their corresponding keys. Map expected date of joining or expected start date to application.expectedJoiningDate; keep it distinct from date of birth, education dates, and employment dates. Return only a supplied intent key or null for each fieldId. Return null when a label has no matching profile variable or asks for a preference, job choice, consent, upload, password, OTP, legal declaration, or demographic answer. Never invent values or return placeholder text. Respond only with JSON: {"mappings":{"f0":null}}.`;
 /**
  * Call the OpenRouter API to map sanitized fields to intent keys.
  * Returns only validated mappings (rejects hallucinated keys).

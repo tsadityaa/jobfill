@@ -67,20 +67,98 @@ function setNativeValue(el: HTMLInputElement | HTMLTextAreaElement, value: strin
   }
 }
 
-function getWorkdayDatePartValue(el: HTMLInputElement, value: string): string | undefined {
+function getWorkdayDatePartValue(el: HTMLInputElement, value: string): string | null | undefined {
   const automationId = el.getAttribute('data-automation-id');
   if (el.getAttribute('role') !== 'spinbutton' || !automationId?.startsWith('dateSection')) return undefined;
 
   let month: string | undefined;
   let year: string | undefined;
-  const isoDate = value.match(/^(\d{4})-(\d{2})(?:-\d{2})?$/);
-  const monthYear = value.match(/^(\d{1,2})[/-](\d{4})$/);
-  if (isoDate) [, year, month] = isoDate;
-  else if (monthYear) [, month, year] = monthYear;
+  const normalized = value.trim();
+  const isoDate = normalized.match(/^(\d{4})[-./:](\d{1,2})(?:[-./:](\d{1,2}))?$/);
+  const monthYear = normalized.match(/^(\d{1,2})[./:-](\d{4})$/);
+  const numericDate = normalized.match(/^(\d{1,2})[./:-](\d{1,2})[./:-](\d{4})$/);
+  if (isoDate) {
+    [, year, month] = isoDate;
+    const day = isoDate[3];
+    if (day && !isValidCalendarDate(Number(year), Number(month), Number(day))) return null;
+  } else if (monthYear) {
+    [, month, year] = monthYear;
+  } else if (numericDate) {
+    const first = Number(numericDate[1]);
+    const second = Number(numericDate[2]);
+    year = numericDate[3];
+    const dateOrder = new Intl.DateTimeFormat(navigator.language)
+      .formatToParts(new Date(2001, 10, 22))
+      .filter((part) => part.type === 'day' || part.type === 'month')
+      .map((part) => part.type);
+    const monthFirst = dateOrder.indexOf('month') < dateOrder.indexOf('day');
+    if (first > 12) {
+      month = String(second);
+      if (!isValidCalendarDate(Number(year), second, first)) return null;
+    } else if (second > 12) {
+      month = String(first);
+      if (!isValidCalendarDate(Number(year), first, second)) return null;
+    } else if (monthFirst) {
+      month = String(first);
+      if (!isValidCalendarDate(Number(year), first, second)) return null;
+    } else {
+      month = String(second);
+      if (!isValidCalendarDate(Number(year), second, first)) return null;
+    }
+  } else {
+    return null;
+  }
+
+  if (!month || !year || Number(month) < 1 || Number(month) > 12) return null;
 
   if (automationId === 'dateSectionMonth-input') return month;
   if (automationId === 'dateSectionYear-input') return year;
   return undefined;
+}
+
+function isValidCalendarDate(year: number, month: number, day: number): boolean {
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCFullYear() === year
+    && date.getUTCMonth() === month - 1
+    && date.getUTCDate() === day;
+}
+
+function formatDateForInput(el: HTMLInputElement, value: string): string {
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return value;
+
+  const [, year, month, day] = match;
+  const date = new Date(Date.UTC(Number(year), Number(month) - 1, Number(day)));
+  if (
+    date.getUTCFullYear() !== Number(year)
+    || date.getUTCMonth() !== Number(month) - 1
+    || date.getUTCDate() !== Number(day)
+  ) return value;
+
+  const isoDate = `${year}-${month}-${day}`;
+  if (el.type === 'date') return isoDate;
+  if (el.type === 'month') return `${year}-${month}`;
+  if (el.type === 'datetime-local') return `${isoDate}T00:00`;
+
+  const hints = [
+    el.getAttribute('placeholder'),
+    el.getAttribute('aria-label'),
+    el.getAttribute('title'),
+    el.getAttribute('data-date-format'),
+    ...Array.from(el.labels ?? [], (label) => label.textContent ?? ''),
+  ].filter(Boolean).join(' ').toUpperCase();
+  const format = hints.match(/(D{1,2}|M{1,2}|Y{2,4})([./:-])(D{1,2}|M{1,2}|Y{2,4})\2(D{1,2}|M{1,2}|Y{2,4})/);
+  if (!format) return isoDate;
+
+  const tokens = [format[1], format[3], format[4]];
+  if (new Set(tokens.map((token) => token[0])).size !== 3) return isoDate;
+
+  const parts: Record<string, string> = {
+    D: tokens.find((token) => token.startsWith('D'))?.length === 2 ? day : String(Number(day)),
+    M: tokens.find((token) => token.startsWith('M'))?.length === 2 ? month : String(Number(month)),
+    Y: tokens.find((token) => token.startsWith('Y'))?.length === 2 ? year.slice(-2) : year,
+  };
+  return tokens.map((token) => parts[token[0]]).join(format[2]);
 }
 
 /**
@@ -373,8 +451,16 @@ export function fillFields(mappings: FieldMapping[]): AutofillResult {
       let ok = false;
 
       if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+        const workdayDateValue = el instanceof HTMLInputElement
+          ? getWorkdayDatePartValue(el, mapping.value)
+          : undefined;
+        if (workdayDateValue === null) {
+          results.push({ selector: mapping.selector, profileField: mapping.profileField, status: 'error', message: `Unsupported date format: "${mapping.value}"` });
+          errorCount++;
+          continue;
+        }
         const value = el instanceof HTMLInputElement
-          ? getWorkdayDatePartValue(el, mapping.value) ?? mapping.value
+          ? workdayDateValue ?? formatDateForInput(el, mapping.value)
           : mapping.value;
         setNativeValue(el, value);
         dispatchInputEvents(el, true /* skipBlur */);

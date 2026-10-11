@@ -22,6 +22,7 @@ export type ProfileFieldKey =
   | 'personal.lastName'
   | 'personal.fullName'
   | 'personal.dateOfBirth'
+  | 'application.expectedJoiningDate'
   | 'phones.primary'
   | 'emails.primary'
   | 'emails.personal'

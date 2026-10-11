@@ -75,6 +75,15 @@ const FIELD_DICTIONARY: FieldPattern[] = [
     autocompleteValues: ['bday'],
     inputTypes: ['date'],
   },
+  {
+    profileField: 'application.expectedJoiningDate',
+    patterns: [
+      /^expected[_-]?(?:date[_-]of[_-]?)?(?:joining|start)(?:[_-]?date)?$/i,
+      /^date[_-]?of[_-]?joining$/i,
+      /^joining[_-]?date$/i,
+    ],
+    autocompleteValues: [],
+  },
 
   // ---- Contact ----
   {
@@ -445,17 +454,20 @@ export function getLabelText(el: HTMLElement): string | undefined {
     if (text) return text;
   }
 
+  // aria-labelledby may reference both a question heading and its description.
+  const labelledBy = el.getAttribute('aria-labelledby');
+  if (labelledBy) {
+    const text = labelledBy.split(/\s+/)
+      .map((id) => queryRoot.querySelector(`#${CSS.escape(id)}`)?.textContent?.trim() ?? '')
+      .filter(Boolean)
+      .join(' ');
+    if (text) return text;
+  }
+
   const googleFormCard = el.closest<HTMLElement>('[role="listitem"]');
   const googleFormHeading = googleFormCard?.querySelector<HTMLElement>('[role="heading"], h1, h2, h3, h4');
   const googleFormQuestion = googleFormHeading?.textContent?.replace(/\s+/g, ' ').trim();
   if (googleFormQuestion && googleFormQuestion.length < 240) return googleFormQuestion;
-
-  // 3. Check aria-labelledby
-  const labelledBy = el.getAttribute('aria-labelledby');
-  if (labelledBy) {
-    const labelEl = queryRoot.querySelector(`#${CSS.escape(labelledBy)}`);
-    if (labelEl) return labelEl.textContent?.trim();
-  }
 
   // 4. Check aria-label directly
   const ariaLabel = el.getAttribute('aria-label');
