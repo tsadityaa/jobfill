@@ -1,4 +1,5 @@
 import type { UserProfile } from '../types/profile';
+import { isLinkRequestQuestion } from './questionDetector';
 
 const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
 
@@ -23,9 +24,102 @@ export function formatProfileAnswerContext(profile: UserProfile): string {
   return facts.join('\n');
 }
 
+function extractMemoryLinks(memories: string[]): string[] {
+  const links = new Map<string, string>();
+  for (const memory of memories) {
+    for (const match of memory.match(/https?:\/\/[^\s<>"'`]+/gi) ?? []) {
+      const link = match.replace(/[),.;!?}\]]+$/g, '');
+      try {
+        const parsed = new URL(link);
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') continue;
+        const key = parsed.href.toLowerCase();
+        if (!links.has(key)) links.set(key, link);
+      } catch {
+        // Ignore malformed URLs in retrieved memories.
+      }
+    }
+  }
+  return [...links.values()];
+}
+
+function canonicalizeHttpUrl(value: string): string | undefined {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return undefined;
+    return url.href.toLowerCase();
+  } catch {
+    return undefined;
+  }
+}
+
+async function selectRelevantMemoryLinks(question: string, memories: string[], apiKey: string): Promise<string> {
+  const availableLinks = extractMemoryLinks(memories);
+  if (availableLinks.length === 0) return '';
+
+  const response = await fetch(OPENROUTER_API_URL, {
+    method: 'POST',
+    signal: AbortSignal.timeout(30000),
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+      'HTTP-Referer': 'http://localhost:3000',
+      'X-Title': 'Personal Copilot Extension',
+    },
+    body: JSON.stringify({
+      model: 'openai/gpt-4o-mini',
+      temperature: 0,
+      max_tokens: 300,
+      response_format: { type: 'json_object' },
+      messages: [
+        {
+          role: 'system',
+          content: 'Select only URLs from the supplied Supermemory results that directly match what the question asks for. Do not include unrelated links such as LinkedIn, a general portfolio, company websites, job sites, or project repositories unless the question specifically requests them. Never invent, edit, or normalize a URL. Return only JSON in this format: {"links":["exact URL"]}. Return an empty array if no supplied URL is relevant.',
+        },
+        {
+          role: 'user',
+          content: JSON.stringify({
+            question,
+            availableUrls: availableLinks,
+            supermemoryResults: memories.map((memory) => memory.slice(0, 1800)),
+          }),
+        },
+      ],
+    }),
+  });
+
+  if (!response.ok) throw new Error(`OpenRouter link selection failed (${response.status}).`);
+  const data = await response.json();
+  const content = data?.choices?.[0]?.message?.content;
+  if (typeof content !== 'string') return '';
+
+  const parsed = JSON.parse(content.replace(/^```(?:json)?\s*|\s*```$/g, '')) as { links?: unknown };
+  if (!Array.isArray(parsed.links)) return '';
+
+  const availableByCanonical = new Map(
+    availableLinks.flatMap((link) => {
+      const canonical = canonicalizeHttpUrl(link);
+      return canonical ? [[canonical, link] as const] : [];
+    }),
+  );
+  const selected = new Set<string>();
+  const result: string[] = [];
+  for (const value of parsed.links) {
+    if (typeof value !== 'string') continue;
+    const canonical = canonicalizeHttpUrl(value);
+    const exactMemoryLink = canonical ? availableByCanonical.get(canonical) : undefined;
+    if (!exactMemoryLink || selected.has(canonical!)) continue;
+    selected.add(canonical!);
+    result.push(exactMemoryLink);
+  }
+  return result.join(', ');
+}
+
 export async function generateApplicationAnswer(question: string, memories: string[], profileContext: string): Promise<string> {
   const apiKey = import.meta.env.VITE_OPENROUTER_API_KEY;
   if (!apiKey || apiKey === 'xyzz') throw new Error('OpenRouter API key is not configured.');
+  if (isLinkRequestQuestion(question)) {
+    return selectRelevantMemoryLinks(question, memories, apiKey);
+  }
   if (!memories.length && !profileContext.trim()) throw new Error('Add professional skills or experience to your profile before generating answers.');
 
   const response = await fetch(OPENROUTER_API_URL, {
