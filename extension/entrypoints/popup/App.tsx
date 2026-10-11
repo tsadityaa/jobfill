@@ -10,7 +10,7 @@ import AgentChat from '../../components/AgentChat';
 import DocumentsSection from '../../components/DocumentsSection';
 import LoginScreen from '../../components/LoginScreen';
 import type { User } from '@supabase/supabase-js';
-import { addMemory } from '../../utils/memory';
+import { addMemory, syncProfileToMemory } from '../../utils/memory';
 
 type TabId = 'details' | 'documents' | 'agent';
 
@@ -63,6 +63,9 @@ export default function App() {
       try {
         const p = await cloudGetProfile();
         setProfile(p);
+        if (user) {
+          syncProfileToMemory(user.id, p).catch(console.error);
+        }
       } catch (err) {
         console.error('Failed to load profile:', err);
         setProfile(createEmptyProfile());
@@ -92,20 +95,10 @@ export default function App() {
     try {
       await cloudSaveProfile(updated);
       
-      // Update memory with core profile facts
+      // Update memory with comprehensive profile facts
       if (user) {
-        const memoryString = `My core profile facts:
-Name: ${updated.personal.firstName} ${updated.personal.lastName}
-Email: ${updated.emails.find(e => e.primary)?.value || updated.emails[0]?.value || 'None'}
-Phone: ${updated.phones.find(p => p.primary)?.value || updated.phones[0]?.value || 'None'}
-LinkedIn: ${updated.professional.linkedin || 'None'}
-Skills: ${updated.professional.skills.join(', ') || 'None'}
-Education: ${updated.education.map(e => `${e.degree} in ${e.field} from ${e.institution}`).join('; ')}
-Experience: ${updated.experience.map(e => `${e.title} at ${e.company}`).join('; ')}`;
-
-        addMemory(user.id, memoryString, { type: 'profile_summary' }).catch(console.error);
+        await syncProfileToMemory(user.id, updated).catch(console.error);
       }
-      
     } catch (err) {
       console.error('Failed to save profile:', err);
     } finally {

@@ -58,6 +58,25 @@ export async function setQuestionAutofillRequested(tabId: number, requested: boo
   });
 }
 
+export async function appendQuestionTasks(
+  tabId: number,
+  url: string,
+  frameId: number,
+  newTasks: QuestionTask[],
+): Promise<void> {
+  return mutateStore((store) => {
+    const existing = store[tabId];
+    if (existing) {
+      // De-duplicate by selector so we never enqueue a field twice
+      const existingSelectors = new Set(existing.tasks.map((t) => t.selector));
+      const unique = newTasks.filter((t) => !existingSelectors.has(t.selector));
+      existing.tasks = [...existing.tasks, ...unique];
+    } else {
+      store[tabId] = { tabId, url, frameId, autofillRequested: false, tasks: newTasks };
+    }
+  });
+}
+
 export async function clearQuestionState(tabId: number): Promise<void> {
   return mutateStore((store) => {
     delete store[tabId];

@@ -146,6 +146,28 @@ export default function ProfileSection({ profile, onSave }: ProfileSectionProps)
             />
           </div>
         </div>
+        <div className="form-row">
+          <div className="form-group">
+            <label className="form-label">
+              Gender
+              <CopyButton value={profile.personal.gender || ''} label="gender" />
+            </label>
+            <select
+              id="profile-gender"
+              className="form-input"
+              value={profile.personal.gender ?? ''}
+              onChange={(e) =>
+                update('personal', { ...profile.personal, gender: e.target.value })
+              }
+            >
+              <option value="">Select Gender</option>
+              <option value="Male">Male</option>
+              <option value="Female">Female</option>
+              <option value="Other">Other</option>
+              <option value="Prefer not to say">Prefer not to say</option>
+            </select>
+          </div>
+        </div>
       </ProfileCard>
 
       {/* ===== PHONES ===== */}

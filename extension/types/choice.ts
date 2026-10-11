@@ -1,4 +1,4 @@
-export type ChoiceControlKind = 'radio' | 'checkbox';
+export type ChoiceControlKind = 'radio' | 'checkbox' | 'select';
 
 export interface ChoiceOption {
   id: string;

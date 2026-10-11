@@ -18,7 +18,7 @@ import { ALL_INTENT_KEYS } from '../types/aiMapper';
 import { resolveProfileValue } from '../utils/fieldMapper';
 import { cloudGetProfile, cloudLoadAllDocumentMetadata, cloudLoadDocumentBlob } from '../utils/cloudStorage';
 import { getCurrentUser } from '../utils/supabase';
-import { searchMemory } from '../utils/memory';
+import { searchMemory, syncProfileToMemory } from '../utils/memory';
 import { extractProfileFieldFromDocuments, formatProfileAnswerContext, generateApplicationAnswer } from '../utils/answerGenerator';
 import { detectApplicationQuestions } from '../utils/questionDetector';
 import {
@@ -32,7 +32,7 @@ import {
   resolveOptimisticJobAvailability,
 } from '../utils/choiceResolver';
 import { classifyDocumentField, selectDocumentForUpload } from '../utils/documentMatcher';
-import { clearQuestionState, getQuestionState, setQuestionAutofillRequested, setQuestionState, updateQuestionTask } from '../utils/questionTaskStore';
+import { appendQuestionTasks, clearQuestionState, getQuestionState, setQuestionAutofillRequested, setQuestionState, updateQuestionTask } from '../utils/questionTaskStore';
 import { clearFileUploadState, getFileUploadState, setFileAutofillRequested, setFileUploadState, updateFileUploadTask } from '../utils/fileUploadTaskStore';
 import {
   getCachedMapping,
@@ -362,6 +362,21 @@ function isAvailabilityChoice(control: ChoiceControl): boolean {
     && control.options.some((option) => /^(?:yes|true|available|no|false|unavailable)$/i.test(option.label.trim()));
 }
 
+function isOverridableChoice(control: ChoiceControl, selectedOption?: { label: string }): boolean {
+  if (!selectedOption) return false;
+  const label = selectedOption.label.trim().toLowerCase();
+  // 1. Screening/availability question currently selected as No/False/Unavailable
+  const isScreening = !control.multiple
+    && /\b(?:available|availability|immediate|immediately|joining|join|start|onsite|on site|internship|relocat(?:e|ion)|hybrid|in person|commute|shift|facility|legally authorized|work authorization|authorized to work|eligible to work|right to work)\b/i.test(control.question);
+  if (isScreening && /^(?:no|false|unavailable|i do not|do not)$/i.test(label)) return true;
+
+  // 2. Gender question currently selected as "choose not to disclose" / "prefer not to say"
+  const isGender = !control.multiple && /\b(?:gender|sex)\b/i.test(control.question);
+  if (isGender && /^(?:i choose not to disclose|choose not to disclose|decline to identify|prefer not to say|do not wish to disclose|not specified)$/i.test(label)) return true;
+
+  return false;
+}
+
 function hasSelectedChoice(control: ChoiceControl): boolean {
   return control.options.some((option) => option.selected && !option.disabled
     && !/^(?:choose(?: one)?|select(?: one)?|please select|select\.\.\.|--|)$/i.test(option.label.trim()));
@@ -434,7 +449,7 @@ async function runChoicePipeline(tabId: number, frameId: number, url: string): P
     for (const control of controls) {
       if (!hasSelectedChoice(control)) continue;
       const selected = control.options.find((option) => option.selected && !option.disabled);
-      if (isAvailabilityChoice(control) && selected && /^(?:no|false|unavailable)$/i.test(selected.label.trim())) {
+      if (isOverridableChoice(control, selected)) {
         resolvedIds.delete(control.id);
         appliedIds.delete(control.id);
         progress.decisions = progress.decisions.filter((decision) => decision.controlId !== control.id);
@@ -469,115 +484,102 @@ async function runChoicePipeline(tabId: number, frameId: number, url: string): P
         console.warn(`[JobFill Choice] Tab ${tabId}: user unavailable for choice document/memory lookup`, error);
       }
 
+      if (profile && userId) {
+        void syncProfileToMemory(userId, profile).catch(console.error);
+      }
+
       const decisions: ChoiceDecision[] = [];
-      const unresolved: ChoiceControl[] = [];
       const evidenceByControl = new Map<string, ChoiceEvidence>();
+
+      // 1. Parallel Supermemory retrieval for all candidate questions
+      console.info(`[JobFill Choice] Tab ${tabId}: querying Supermemory for ${candidates.length} candidate questions`);
+      const memoryResults = await Promise.all(candidates.map(async (control) => {
+        if (!userId) return { control, matches: [] as string[] };
+        const query = control.question.trim();
+        return { control, matches: await searchMemory(userId, query) };
+      }));
+      const memoryByControlId = new Map(memoryResults.map(({ control, matches }) => [control.id, matches]));
+
+      // 2. Assemble complete evidence and check cache
+      const aiRequests: Array<{ control: ChoiceControl; evidence: ChoiceEvidence }> = [];
       for (const control of candidates) {
         const profileFacts = profile ? getRelevantProfileFacts(profile, control.question) : [];
         const relevantFormAnswers = getRelevantChoiceFormAnswers(
           control,
           formAnswers.map(({ question, answer }) => `${question}: ${answer}`),
         );
-        const evidence: ChoiceEvidence = { profileFacts, memories: [], formAnswers: relevantFormAnswers };
+        const memories = (memoryByControlId.get(control.id) ?? []).slice(0, 5);
+        const evidence: ChoiceEvidence = { profileFacts, memories, formAnswers: relevantFormAnswers };
         evidenceByControl.set(control.id, evidence);
-        console.info(`[JobFill Choice] Tab ${tabId}: evaluating ${control.id}`, {
-          kind: control.kind,
-          question: control.question,
-          profileFactCount: profileFacts.length,
-          profileFacts: profileFacts.slice(0, 5),
-          relevantFormAnswerCount: relevantFormAnswers.length,
-          relevantFormAnswers,
-        });
 
         const cached = await getCachedChoice(control, evidence);
         if (cached) {
           decisions.push(cached);
-          console.info(`[JobFill Choice] Tab ${tabId}: ${control.id} ✓ resolved from choice cache`, { selectedOptionIds: cached.selectedOptionIds, confidence: cached.confidence });
+          console.info(`[JobFill Choice] Tab ${tabId}: ${control.id} ✓ resolved from choice cache`, {
+            selectedOptionIds: cached.selectedOptionIds,
+            confidence: cached.confidence,
+          });
           continue;
         }
-        const profileDecision = profile ? resolveChoiceFromProfile(control, profile) : null;
-        if (profileDecision && profileDecision.confidence >= 0.9) {
-          decisions.push(profileDecision);
-          await cacheChoice(control, evidence, profileDecision);
-          console.info(`[JobFill Choice] Tab ${tabId}: ${control.id} ✓ resolved from profile`, { selectedOptionIds: profileDecision.selectedOptionIds, confidence: profileDecision.confidence });
-          continue;
-        }
-        console.info(`[JobFill Choice] Tab ${tabId}: ${control.id} ✗ profile resolver ${profileDecision ? `returned low confidence (${profileDecision.confidence})` : 'returned null'}`);
-        const formDecision = resolveChoiceFromEvidence(control, relevantFormAnswers, 'form');
-        if (formDecision && formDecision.confidence >= 0.85) {
-          decisions.push(formDecision);
-          await cacheChoice(control, evidence, formDecision);
-          console.info(`[JobFill Choice] Tab ${tabId}: ${control.id} ✓ resolved from same-form evidence`, { selectedOptionIds: formDecision.selectedOptionIds, confidence: formDecision.confidence });
-          continue;
-        }
-        console.info(`[JobFill Choice] Tab ${tabId}: ${control.id} ✗ form evidence resolver ${formDecision ? `returned low confidence (${formDecision.confidence})` : 'returned null'} → will try memory + AI`);
-        unresolved.push(control);
+
+        aiRequests.push({ control, evidence });
       }
 
-      console.info(`[JobFill Choice] Tab ${tabId}: after local resolvers: ${decisions.length} resolved, ${unresolved.length} unresolved → querying memory for unresolved`, {
-        resolvedIds: decisions.map((d) => d.controlId),
-        unresolvedIds: unresolved.map((c) => c.id),
-      });
-
-      const memoryResults = await Promise.all(unresolved.map(async (control) => {
-        if (!userId) return { control, matches: [] as string[] };
-        const options = control.options.filter((option) => !option.disabled).map((option) => option.label);
-        const query = `Job application ${control.kind} question: ${control.question}. Options: ${options.join('; ')}`;
-        return { control, matches: await searchMemory(userId, query) };
-      }));
-      const aiRequests: Array<{ control: ChoiceControl; evidence: ChoiceEvidence }> = [];
-      for (const { control, matches } of memoryResults) {
-        const evidence = evidenceByControl.get(control.id)!;
-        evidence.memories = matches.slice(0, 5);
-        console.info(`[JobFill Choice] Tab ${tabId}: ${control.id} memory search returned ${matches.length} matches`, { matches: matches.slice(0, 3) });
-        const cached = await getCachedChoice(control, evidence);
-        if (cached) {
-          decisions.push(cached);
-          console.info(`[JobFill Choice] Tab ${tabId}: ${control.id} ✓ resolved from cache (with memory key)`);
-          continue;
-        }
-        const memoryDecision = resolveChoiceFromEvidence(control, evidence.memories);
-        if (memoryDecision && memoryDecision.confidence >= 0.85) {
-          decisions.push(memoryDecision);
-          await cacheChoice(control, evidence, memoryDecision);
-          console.info(`[JobFill Choice] Tab ${tabId}: ${control.id} ✓ resolved from hybrid memory/document evidence`);
-        } else {
-          console.info(`[JobFill Choice] Tab ${tabId}: ${control.id} ✗ memory resolver ${memoryDecision ? `returned low confidence (${memoryDecision.confidence})` : 'returned null'} → sending to AI`);
-          aiRequests.push({ control, evidence });
+      // 3. AI-First Resolution: Send all uncached controls to OpenRouter with full profile facts and Supermemory chunks
+      if (aiRequests.length) {
+        console.info(`[JobFill Choice] Tab ${tabId}: sending ${aiRequests.length} controls to OpenRouter AI resolver`, aiRequests.map(({ control }) => ({ id: control.id, question: control.question })));
+        const aiDecisions = await resolveChoicesWithAI(aiRequests);
+        console.info(`[JobFill Choice] Tab ${tabId}: OpenRouter resolved ${aiDecisions.length}/${aiRequests.length} controls`, aiDecisions.map((d) => ({ controlId: d.controlId, selectedOptionIds: d.selectedOptionIds, confidence: d.confidence })));
+        for (const decision of aiDecisions) {
+          const control = candidates.find((item) => item.id === decision.controlId);
+          const evidence = evidenceByControl.get(decision.controlId);
+          if (control && evidence) await cacheChoice(control, evidence, decision);
+          decisions.push(decision);
         }
       }
 
-      console.info(`[JobFill Choice] Tab ${tabId}: sending ${aiRequests.length} controls to AI resolver`, aiRequests.map(({ control }) => ({ id: control.id, question: control.question })));
-      const aiDecisions = await resolveChoicesWithAI(aiRequests);
-      console.info(`[JobFill Choice] Tab ${tabId}: OpenRouter resolved ${aiDecisions.length}/${aiRequests.length} radio/checkbox controls`, aiDecisions.map((d) => ({ controlId: d.controlId, selectedOptionIds: d.selectedOptionIds, confidence: d.confidence })));
-      for (const decision of aiDecisions) {
-        const control = candidates.find((item) => item.id === decision.controlId);
-        const evidence = evidenceByControl.get(decision.controlId);
-        if (control && evidence) await cacheChoice(control, evidence, decision);
-        decisions.push(decision);
-      }
-
-      // Log controls that AI also couldn't resolve
-      const decisionIds = new Set(decisions.map((decision) => decision.controlId));
-      const stillUnresolved = candidates.filter((c) => !decisionIds.has(c.id));
-      if (stillUnresolved.length) {
-        console.warn(`[JobFill Choice] Tab ${tabId}: ${stillUnresolved.length} controls remain unresolved after all resolvers`, stillUnresolved.map((c) => ({ id: c.id, question: c.question })));
-      }
-
+      // 4. Fallback for any controls not resolved by AI (e.g. offline, rate-limited, or placeholder key)
+      const decisionIds = new Set(decisions.map((d) => d.controlId));
       for (const control of candidates) {
         if (decisionIds.has(control.id)) continue;
         const evidence = evidenceByControl.get(control.id);
         if (!evidence) continue;
-        const preference = resolveOptimisticJobAvailability(control, [
+
+        // Fallback 1: Profile-based heuristic
+        const profileDecision = profile ? resolveChoiceFromProfile(control, profile) : null;
+        if (profileDecision && profileDecision.confidence >= 0.9) {
+          decisions.push(profileDecision);
+          await cacheChoice(control, evidence, profileDecision);
+          decisionIds.add(control.id);
+          console.info(`[JobFill Choice] Tab ${tabId}: ${control.id} ✓ fallback resolved from profile`, { selectedOptionIds: profileDecision.selectedOptionIds });
+          continue;
+        }
+
+        // Fallback 2: Optimistic job availability / screening
+        const screeningDecision = resolveOptimisticJobAvailability(control, [
           ...evidence.profileFacts,
           ...evidence.memories,
           ...evidence.formAnswers,
         ]);
-        if (preference) {
-          console.info(`[JobFill Choice] Tab ${tabId}: ${control.id} ✓ resolved via optimistic job availability`, { selectedOptionIds: preference.selectedOptionIds });
-          decisions.push(preference);
+        if (screeningDecision && screeningDecision.confidence >= 0.85) {
+          decisions.push(screeningDecision);
+          await cacheChoice(control, evidence, screeningDecision);
           decisionIds.add(control.id);
+          console.info(`[JobFill Choice] Tab ${tabId}: ${control.id} ✓ fallback resolved via optimistic screening`, { selectedOptionIds: screeningDecision.selectedOptionIds });
+          continue;
         }
+
+        // Fallback 3: Memory / Form evidence heuristic
+        const evidenceDecision = resolveChoiceFromEvidence(control, [...evidence.memories, ...evidence.formAnswers]);
+        if (evidenceDecision && evidenceDecision.confidence >= 0.85) {
+          decisions.push(evidenceDecision);
+          await cacheChoice(control, evidence, evidenceDecision);
+          decisionIds.add(control.id);
+          console.info(`[JobFill Choice] Tab ${tabId}: ${control.id} ✓ fallback resolved from evidence`, { selectedOptionIds: evidenceDecision.selectedOptionIds });
+          continue;
+        }
+
+        console.warn(`[JobFill Choice] Tab ${tabId}: ${control.id} could not be resolved by AI or fallbacks`, { question: control.question });
       }
 
       const decisionsById = new Map(progress.decisions.map((decision) => [decision.controlId, decision]));
@@ -931,6 +933,10 @@ async function runPrescanPipeline(tabId: number, googleFormsFrameId?: number): P
     let profile: UserProfile | undefined;
     try {
       profile = await cloudGetProfile();
+      const currentUser = await getCurrentUser();
+      if (currentUser && profile) {
+        void syncProfileToMemory(currentUser.id, profile).catch(console.error);
+      }
     } catch (error) {
       console.warn(`[JobFill BG] Tab ${tabId}: profile unavailable before mapping`, error);
     }
@@ -1022,6 +1028,46 @@ async function runPrescanPipeline(tabId: number, googleFormsFrameId?: number): P
           }
 
           aiMappedCount = aiMappings.length;
+
+          // --- Pipeline 2 dispatch: fire-and-forget for NO_PROFILE_MATCH Google Forms fields ---
+          const aiMappedSelectors = new Set(aiMappings.map((m) => m.selector));
+          const gfNoMatchCandidates = aiCandidates.fields.filter((candidate) => {
+            const selector = selectorLookup[candidate.fieldId];
+            return selector && !aiMappedSelectors.has(selector);
+          });
+          if (gfNoMatchCandidates.length > 0) {
+            const gfP2Tasks: import('../types/questionTask').QuestionTask[] = [];
+            const gfExistingState = await getQuestionState(tabId);
+            const gfExistingSelectors = new Set(gfExistingState?.tasks.map((t) => t.selector) ?? []);
+            const gfExistingCount = gfExistingState?.tasks.length ?? 0;
+
+            for (let i = 0; i < gfNoMatchCandidates.length; i++) {
+              const candidate = gfNoMatchCandidates[i];
+              const selector = selectorLookup[candidate.fieldId];
+              if (!selector || gfExistingSelectors.has(selector)) continue;
+
+              const field = scanResult.fields.find((item) => item.selector === selector);
+              const questionText = (candidate as { label?: string }).label
+                || [field?.attributes.labelText, field?.attributes.ariaLabel, field?.attributes.placeholder, field?.attributes.helpText]
+                    .filter(Boolean).join(' ').replace(/\s+/g, ' ').trim()
+                || 'Unknown field';
+
+              gfP2Tasks.push({
+                fieldId: `p2_${gfExistingCount + i}`,
+                selector,
+                frameId,
+                question: questionText,
+                type: 'application_question',
+                status: 'RETRIEVING',
+              });
+            }
+
+            if (gfP2Tasks.length > 0) {
+              console.log(`[JobFill BG] Tab ${tabId}: Google Forms Pipeline 1 → NO_PROFILE_MATCH for ${gfP2Tasks.length} fields; dispatching to Pipeline 2 (fire-and-forget)`);
+              void appendQuestionTasks(tabId, scanResult.url, frameId, gfP2Tasks)
+                .then(() => processQuestionTasks(tabId, gfP2Tasks));
+            }
+          }
         } catch (error) {
           console.warn(`[JobFill BG] Tab ${tabId}: Google Forms AI mapping failed; keeping local matches`, error);
         }
@@ -1076,6 +1122,8 @@ async function runPrescanPipeline(tabId: number, googleFormsFrameId?: number): P
             timeoutMs: 15000,
           });
 
+          const noProfileMatchCandidates: typeof aiCandidates.fields = [];
+
           for (const candidate of aiCandidates.fields) {
             const selector = selectorLookup[candidate.fieldId];
             if (!selector) continue;
@@ -1092,11 +1140,52 @@ async function runPrescanPipeline(tabId: number, googleFormsFrameId?: number): P
               continue;
             }
 
+            // NO_PROFILE_MATCH — AI returned null or profile has no value for this field
+            noProfileMatchCandidates.push(candidate);
           }
 
           aiMappedCount = aiMappings.length;
           scanResult.mappedFields = scanResult.fields.filter((f) => f.category === 'SAFE_AUTO').length;
           scanResult.unknownFields = scanResult.fields.filter((f) => f.category === 'UNKNOWN').length;
+
+          // --- Pipeline 2 dispatch: fire-and-forget for NO_PROFILE_MATCH fields ---
+          if (noProfileMatchCandidates.length > 0) {
+            const p2Tasks: import('../types/questionTask').QuestionTask[] = [];
+            const existingState = await getQuestionState(tabId);
+            const existingSelectors = new Set(existingState?.tasks.map((t) => t.selector) ?? []);
+            const existingCount = existingState?.tasks.length ?? 0;
+
+            for (let i = 0; i < noProfileMatchCandidates.length; i++) {
+              const candidate = noProfileMatchCandidates[i];
+              const selector = selectorLookup[candidate.fieldId];
+              if (!selector || existingSelectors.has(selector)) continue;
+
+              const field = scanResult.fields.find((item) => item.selector === selector);
+              const questionText = [
+                field?.attributes.labelText,
+                field?.attributes.ariaLabel,
+                field?.attributes.placeholder,
+                field?.attributes.helpText,
+              ].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim()
+                || (candidate as { label?: string }).label
+                || 'Unknown field';
+
+              p2Tasks.push({
+                fieldId: `p2_${existingCount + i}`,
+                selector,
+                frameId,
+                question: questionText,
+                type: 'application_question',
+                status: 'RETRIEVING',
+              });
+            }
+
+            if (p2Tasks.length > 0) {
+              console.log(`[JobFill BG] Tab ${tabId}: Pipeline 1 → NO_PROFILE_MATCH for ${p2Tasks.length} fields; dispatching to Pipeline 2 (fire-and-forget)`);
+              void appendQuestionTasks(tabId, scanResult.url, frameId, p2Tasks)
+                .then(() => processQuestionTasks(tabId, p2Tasks));
+            }
+          }
         } catch (aiErr) {
           console.warn(`[JobFill BG] Tab ${tabId}: AI profile mapping failed; no Pipeline 2 tasks were started`, aiErr);
         }

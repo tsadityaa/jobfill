@@ -22,6 +22,7 @@ export interface PersonalInfo {
   firstName: string;
   middleName?: string;
   lastName: string;
+  gender?: string;
   dateOfBirth?: string; // ISO 8601 date string (YYYY-MM-DD)
 }
 
