@@ -1,6 +1,6 @@
 import { getSession } from './supabase';
 
-const BACKEND_URL = (import.meta.env.shoulVITE_JOBFILL_BACKEND_URL as string | undefined)?.replace(/\/+$/, '');
+const BACKEND_URL = (import.meta.env.VITE_JOBFILL_BACKEND_URL as string | undefined)?.replace(/\/+$/, '');
 const OPENROUTER_KEY = import.meta.env.VITE_OPENROUTER_API_KEY as string | undefined;
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
 
