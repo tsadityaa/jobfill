@@ -199,9 +199,179 @@ function getGroupedInputControls(): ChoiceControl[] {
   });
 }
 
+function getSelectControls(): ChoiceControl[] {
+  const hasForms = queryAcrossOpenShadowRoots<HTMLFormElement>('form').length > 0;
+  return queryAcrossOpenShadowRoots<HTMLSelectElement>('select')
+    .filter(isRendered)
+    .filter((select) => !hasForms || isWithinForm(select) || Boolean(select.closest('.form-group.field')))
+    .map((select) => {
+      const selector = getUniqueSelector(select);
+      const options = Array.from(select.options).map((option, index) => makeOption(
+        index,
+        normalizeText(option.label || option.textContent),
+        option.value,
+        option.matches(':disabled'),
+        option.selected,
+        selector,
+      ));
+      return {
+        id: makeControlId('select', questionFor(select), options, selector),
+        kind: 'select',
+        selector,
+        question: questionFor(select),
+        options,
+        multiple: select.multiple,
+      };
+    });
+}
+
+function getGoogleFormsDropdownControls(): ChoiceControl[] {
+  return queryAcrossOpenShadowRoots<HTMLElement>('[role="listbox"]')
+    .filter((listbox) => isRendered(listbox) && Boolean(listbox.closest('[role="listitem"]')))
+    .flatMap((listbox) => {
+      const selector = getUniqueSelector(listbox);
+      const options = Array.from(listbox.querySelectorAll<HTMLElement>('[role="option"]')).map((option, index) => {
+        const label = normalizeText(option.getAttribute('aria-label') || option.textContent);
+        return makeOption(
+          index,
+          label,
+          option.getAttribute('data-value') || label,
+          option.getAttribute('aria-disabled') === 'true',
+          option.getAttribute('aria-selected') === 'true',
+          selector,
+        );
+      }).filter((option) => option.label);
+      if (!options.length) return [];
+
+      return [{
+        id: makeControlId('select', questionFor(listbox), options, selector),
+        kind: 'select' as const,
+        selector,
+        question: questionFor(listbox),
+        options,
+        multiple: listbox.getAttribute('aria-multiselectable') === 'true',
+      }];
+    });
+}
+
+function getComboboxListbox(element: HTMLElement): HTMLElement | null {
+  const ids = [
+    ...(element.getAttribute('aria-controls') ?? '').split(/\s+/),
+    ...(element.getAttribute('aria-owns') ?? '').split(/\s+/),
+    element.id ? `react-select-${element.id}-listbox` : '',
+  ].filter(Boolean);
+  const listboxes = queryAcrossOpenShadowRoots<HTMLElement>('[role="listbox"]');
+  return listboxes.find((listbox) => ids.includes(listbox.id))
+    ?? listboxes.find((listbox) => element.contains(listbox))
+    ?? null;
+}
+
+function captureWindowScroll(): { left: number; top: number } {
+  return { left: window.scrollX, top: window.scrollY };
+}
+
+function restoreWindowScroll(position: { left: number; top: number }): void {
+  window.scrollTo({ left: position.left, top: position.top, behavior: 'instant' });
+}
+
+async function openComboboxListbox(element: HTMLElement): Promise<HTMLElement | null> {
+  const existing = getComboboxListbox(element);
+  if (element.getAttribute('aria-expanded') === 'true' && existing) return existing;
+
+  const scrollPosition = captureWindowScroll();
+  const control = element.closest<HTMLElement>('[class*="select__control"]') ?? element;
+  simulateFullClick(control, false);
+  const deadline = Date.now() + 800;
+  while (Date.now() < deadline) {
+    const listbox = getComboboxListbox(element);
+    if (listbox?.querySelector('[role="option"]')) {
+      restoreWindowScroll(scrollPosition);
+      return listbox;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 30));
+  }
+  restoreWindowScroll(scrollPosition);
+  return getComboboxListbox(element);
+}
+
+function getComboboxSelectedLabels(element: HTMLElement): string[] {
+  const control = element.closest<HTMLElement>('[class*="select__control"]');
+  const values = control?.querySelectorAll<HTMLElement>('[class*="single-value"], [class*="multi-value__label"]');
+  const labels = Array.from(values ?? []).map((value) => normalizeText(value.textContent)).filter(Boolean);
+  if (labels.length) return labels;
+  const inputValue = element instanceof HTMLInputElement ? normalizeText(element.value) : '';
+  return inputValue ? [inputValue] : [];
+}
+
+function isComboboxOptionSelected(element: HTMLElement, option: ChoiceOption): boolean {
+  return getComboboxSelectedLabels(element).some((label) => normalizeText(label) === normalizeText(option.label));
+}
+
+async function waitForComboboxOption(element: HTMLElement, option: ChoiceOption, timeoutMs = 1200): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (isComboboxOptionSelected(element, option)) return true;
+    await new Promise((resolve) => setTimeout(resolve, 40));
+  }
+  return isComboboxOptionSelected(element, option);
+}
+
+async function getComboboxControls(): Promise<ChoiceControl[]> {
+  const inputs = queryAcrossOpenShadowRoots<HTMLElement>('[role="combobox"]')
+    .filter((element) => element instanceof HTMLInputElement && element.type !== 'search' && isRendered(element));
+  const controls: ChoiceControl[] = [];
+
+  for (const element of inputs) {
+    const question = questionFor(element);
+    if (!question) continue;
+    const wasExpanded = element.getAttribute('aria-expanded') === 'true';
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const scrollPosition = captureWindowScroll();
+    const listbox = await openComboboxListbox(element);
+    const optionElements = Array.from(listbox?.querySelectorAll<HTMLElement>('[role="option"]') ?? []);
+    const selectedLabels = getComboboxSelectedLabels(element);
+    const selector = getUniqueSelector(element);
+    const options = optionElements.map((option, index) => {
+      const label = normalizeText(option.getAttribute('aria-label') || option.textContent);
+      return makeOption(
+        index,
+        label,
+        option.getAttribute('data-value') || option.id || label,
+        option.getAttribute('aria-disabled') === 'true',
+        selectedLabels.some((selected) => normalizeText(selected) === normalizeText(label)),
+        selector,
+      );
+    }).filter((option) => option.label);
+
+    if (!wasExpanded) {
+      if (element.getAttribute('aria-expanded') === 'true') {
+        const control = element.closest<HTMLElement>('[class*="select__control"]') ?? element;
+        simulateFullClick(control, false);
+      }
+      if (previousFocus && previousFocus !== element) previousFocus.focus({ preventScroll: true });
+      else element.blur();
+    }
+    restoreWindowScroll(scrollPosition);
+    if (!options.length) continue;
+
+    controls.push({
+      id: makeControlId('select', question, options, selector),
+      kind: 'select',
+      selector,
+      question,
+      options,
+      multiple: listbox?.getAttribute('aria-multiselectable') === 'true',
+    });
+  }
+  return controls;
+}
+
 export async function scanChoiceControls(): Promise<ChoiceControl[]> {
   const controls: ChoiceControl[] = [];
   controls.push(...getGroupedInputControls());
+  controls.push(...getSelectControls());
+  controls.push(...getGoogleFormsDropdownControls());
+  controls.push(...await getComboboxControls());
 
   console.info(`[JobFill Choice] DOM scan detected ${controls.length} controls`, controls.map((control) => ({
     id: control.id,
@@ -280,9 +450,9 @@ export function extractChoiceFormAnswers(): ChoiceFormAnswer[] {
  * element.click() only fires the last event, which the Closure-based
  * handlers silently ignore.
  */
-function simulateFullClick(element: HTMLElement): void {
+function simulateFullClick(element: HTMLElement, scrollIntoView = true): void {
   // Scroll into view to ensure the element is interactable
-  element.scrollIntoView({ block: 'nearest', behavior: 'instant' });
+  if (scrollIntoView) element.scrollIntoView({ block: 'nearest', behavior: 'instant' });
 
   const rect = element.getBoundingClientRect();
   const cx = rect.left + rect.width / 2;
@@ -489,6 +659,85 @@ async function waitForCheckedState(element: HTMLElement, expected: boolean, time
   return false;
 }
 
+function isSelectOptionSelected(element: HTMLSelectElement, option: ChoiceOption): boolean {
+  return Array.from(element.options).some((nativeOption) =>
+    nativeOption.selected
+      && nativeOption.value === option.value
+      && normalizeText(nativeOption.label || nativeOption.textContent) === option.label,
+  );
+}
+
+async function waitForSelectOption(element: HTMLSelectElement, option: ChoiceOption, timeoutMs = 1200): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (isSelectOptionSelected(element, option)) return true;
+    await new Promise((resolve) => setTimeout(resolve, 40));
+  }
+  return isSelectOptionSelected(element, option);
+}
+
+async function selectComboboxOption(element: HTMLElement, option: ChoiceOption): Promise<boolean> {
+  const listbox = await openComboboxListbox(element);
+  const target = Array.from(listbox?.querySelectorAll<HTMLElement>('[role="option"]') ?? [])
+    .find((candidate) => normalizeText(candidate.getAttribute('aria-label') || candidate.textContent) === normalizeText(option.label));
+  if (!target || target.getAttribute('aria-disabled') === 'true') return false;
+  const scrollPosition = captureWindowScroll();
+  simulateFullClick(target, false);
+  restoreWindowScroll(scrollPosition);
+  return waitForComboboxOption(element, option);
+}
+
+async function waitForGoogleOption(listbox: HTMLElement, option: ChoiceOption, timeoutMs = 1200): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (findGoogleFormsOption(listbox, option)?.getAttribute('aria-selected') === 'true') return true;
+    await new Promise((resolve) => setTimeout(resolve, 40));
+  }
+  return findGoogleFormsOption(listbox, option)?.getAttribute('aria-selected') === 'true';
+}
+
+function findGoogleFormsOption(listbox: HTMLElement, option: ChoiceOption): HTMLElement | undefined {
+  return Array.from(listbox.querySelectorAll<HTMLElement>('[role="option"]')).find((candidate) =>
+    normalizeText(candidate.getAttribute('aria-label') || candidate.textContent) === normalizeText(option.label),
+  );
+}
+
+async function selectGoogleFormsOption(listbox: HTMLElement, option: ChoiceOption): Promise<boolean> {
+  let target = findGoogleFormsOption(listbox, option);
+  if (!target || target.getAttribute('aria-disabled') === 'true') return false;
+  if (target.getAttribute('aria-selected') === 'true') return true;
+
+  const scrollPosition = captureWindowScroll();
+  const trigger = listbox.querySelector<HTMLElement>('[jsname="LgbsSe"]') ?? listbox;
+  if (listbox.getAttribute('aria-expanded') !== 'true') simulateFullClick(trigger, false);
+  const opened = await waitUntil(() => {
+    const current = findGoogleFormsOption(listbox, option);
+    return Boolean(current && current.getBoundingClientRect().height > 0);
+  }, 800);
+  if (!opened) {
+    if (listbox.getAttribute('aria-expanded') === 'true') simulateFullClick(trigger, false);
+    restoreWindowScroll(scrollPosition);
+    return false;
+  }
+  target = findGoogleFormsOption(listbox, option);
+  if (!target) {
+    restoreWindowScroll(scrollPosition);
+    return false;
+  }
+  simulateFullClick(target, false);
+  restoreWindowScroll(scrollPosition);
+  return waitForGoogleOption(listbox, option);
+}
+
+async function waitUntil(predicate: () => boolean, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 30));
+  }
+  return predicate();
+}
+
 export async function applyChoiceDecisions(decisions: ChoiceDecision[]): Promise<{ applied: string[]; unresolved: string[] }> {
   const controls = await scanChoiceControls();
   const controlsById = new Map(controls.map((control) => [control.id, control]));
@@ -556,9 +805,18 @@ export async function applyChoiceDecisions(decisions: ChoiceDecision[]): Promise
           success = false;
           break;
         }
-        const checked = element instanceof HTMLInputElement
-          ? element.checked
-          : element.getAttribute('aria-checked') === 'true';
+        const googleFormsOption = element.getAttribute('role') === 'listbox'
+          ? findGoogleFormsOption(element, option)
+          : null;
+        const checked = element instanceof HTMLSelectElement
+          ? isSelectOptionSelected(element, option)
+          : element.getAttribute('role') === 'combobox'
+            ? isComboboxOptionSelected(element, option)
+            : googleFormsOption
+              ? googleFormsOption.getAttribute('aria-selected') === 'true'
+          : element instanceof HTMLInputElement
+            ? element.checked
+            : element.getAttribute('aria-checked') === 'true';
         console.info('[JobFill Choice] applying group option', {
           controlId: control.id,
           kind: control.kind,
@@ -569,7 +827,43 @@ export async function applyChoiceDecisions(decisions: ChoiceDecision[]): Promise
           role: element.getAttribute('role'),
           tag: element.tagName,
         });
-        if (!checked) {
+        if (!checked && googleFormsOption && element.getAttribute('role') === 'listbox') {
+          if (!await selectGoogleFormsOption(element, option)) {
+            failureReason = `google-forms-option-not-verified:${option.id}`;
+            success = false;
+            break;
+          }
+        } else if (!checked && element.getAttribute('role') === 'combobox') {
+          if (!await selectComboboxOption(element, option)) {
+            failureReason = `combobox-option-not-verified:${option.id}`;
+            success = false;
+            break;
+          }
+        } else if (!checked && element instanceof HTMLSelectElement) {
+          if (element.multiple) {
+            const nativeOption = Array.from(element.options).find((candidate) =>
+              candidate.value === option.value
+                && normalizeText(candidate.label || candidate.textContent) === option.label,
+            );
+            if (!nativeOption) {
+              failureReason = `select-option-not-found:${option.id}`;
+              success = false;
+              break;
+            }
+            nativeOption.selected = true;
+          } else {
+            const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set;
+            if (setter) setter.call(element, option.value);
+            else element.value = option.value;
+          }
+          element.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+          element.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+          if (!await waitForSelectOption(element, option)) {
+            failureReason = `select-option-not-verified:${option.id}`;
+            success = false;
+            break;
+          }
+        } else if (!checked) {
           if (element instanceof HTMLInputElement) {
             // Use the robust multi-strategy click for native radio/checkbox inputs.
             // Handles React controlled components (Meta/Facebook), plain HTML, and
@@ -606,15 +900,35 @@ export async function applyChoiceDecisions(decisions: ChoiceDecision[]): Promise
             }
           }
         }
-        const verified = await waitForCheckedState(element, true);
+        const verified = element.getAttribute('role') === 'combobox'
+          ? await waitForComboboxOption(element, option)
+          : googleFormsOption && element.getAttribute('role') === 'listbox'
+            ? await waitForGoogleOption(element, option)
+          : element instanceof HTMLSelectElement
+            ? await waitForSelectOption(element, option)
+            : await waitForCheckedState(element, true);
         console.info('[JobFill Choice] group option verification', {
           controlId: control.id,
           option: option.label,
           verified,
-          checked: element instanceof HTMLInputElement ? element.checked : element.getAttribute('aria-checked'),
+          checked: element.getAttribute('role') === 'combobox'
+            ? getComboboxSelectedLabels(element)
+            : googleFormsOption
+              ? googleFormsOption.getAttribute('aria-selected')
+            : element instanceof HTMLSelectElement
+              ? element.value
+            : element instanceof HTMLInputElement
+              ? element.checked
+              : element.getAttribute('aria-checked'),
         });
         if (!verified) {
-          failureReason = `checked-state-not-confirmed:${option.id}`;
+          failureReason = element.getAttribute('role') === 'combobox'
+            ? `combobox-option-not-confirmed:${option.id}`
+            : googleFormsOption
+              ? `google-forms-option-not-confirmed:${option.id}`
+            : element instanceof HTMLSelectElement
+              ? `select-option-not-confirmed:${option.id}`
+              : `checked-state-not-confirmed:${option.id}`;
           success = false;
         }
     }

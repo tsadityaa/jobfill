@@ -29,7 +29,6 @@ import {
   resolveChoiceFromEvidence,
   resolveChoiceFromProfile,
   resolveChoicesWithAI,
-  resolveOptimisticJobAvailability,
 } from '../utils/choiceResolver';
 import { classifyDocumentField, selectDocumentForUpload } from '../utils/documentMatcher';
 import { appendQuestionTasks, clearQuestionState, getQuestionState, setQuestionAutofillRequested, setQuestionState, updateQuestionTask } from '../utils/questionTaskStore';
@@ -318,14 +317,14 @@ async function runQuestionPipeline(
 
 async function processQuestionTasks(tabId: number, tasks: QuestionTask[]): Promise<void> {
   let userId: string | null = null;
-  let profileContext = '';
+  let profile: UserProfile | undefined;
   try {
     userId = (await getCurrentUser())?.id ?? null;
   } catch (error) {
     console.warn(`[JobFill BG] Tab ${tabId}: could not identify user for question memory retrieval`, error);
   }
   try {
-    profileContext = formatProfileAnswerContext(await cloudGetProfile());
+    profile = await cloudGetProfile();
   } catch (error) {
     console.warn(`[JobFill BG] Tab ${tabId}: could not load profile context for question answers`, error);
   }
@@ -334,6 +333,7 @@ async function processQuestionTasks(tabId: number, tasks: QuestionTask[]): Promi
     try {
       const memories = userId ? await searchMemory(userId, task.question) : [];
       await updateQuestionTask(tabId, task.fieldId, { status: 'GENERATING' });
+      const profileContext = profile ? formatProfileAnswerContext(profile, task.question) : '';
       const answer = await generateApplicationAnswer(task.question, memories, profileContext);
       if (!answer) throw new Error('No grounded answer was available from saved memories.');
       await updateQuestionTask(tabId, task.fieldId, { status: 'READY_TO_FILL', answer });
@@ -470,77 +470,105 @@ async function runChoicePipeline(tabId: number, frameId: number, url: string): P
 
     if (candidates.length) {
       let profile: UserProfile | undefined;
-      let userId: string | null = null;
       try {
         profile = await cloudGetProfile();
         console.info(`[JobFill Choice] Tab ${tabId}: profile loaded successfully`);
       } catch (error) {
         console.warn(`[JobFill Choice] Tab ${tabId}: profile unavailable for choice pipeline`, error);
       }
-      try {
-        userId = (await getCurrentUser())?.id ?? null;
-        console.info(`[JobFill Choice] Tab ${tabId}: user ID ${userId ? 'available' : 'unavailable'}`);
-      } catch (error) {
-        console.warn(`[JobFill Choice] Tab ${tabId}: user unavailable for choice document/memory lookup`, error);
-      }
-
-      if (profile && userId) {
-        void syncProfileToMemory(userId, profile).catch(console.error);
-      }
 
       const decisions: ChoiceDecision[] = [];
       const evidenceByControl = new Map<string, ChoiceEvidence>();
 
-      // 1. Parallel Supermemory retrieval for all candidate questions
-      console.info(`[JobFill Choice] Tab ${tabId}: querying Supermemory for ${candidates.length} candidate questions`);
-      const memoryResults = await Promise.all(candidates.map(async (control) => {
-        if (!userId) return { control, matches: [] as string[] };
-        const query = control.question.trim();
-        return { control, matches: await searchMemory(userId, query) };
-      }));
-      const memoryByControlId = new Map(memoryResults.map(({ control, matches }) => [control.id, matches]));
-
-      // 2. Assemble complete evidence and check cache
-      const aiRequests: Array<{ control: ChoiceControl; evidence: ChoiceEvidence }> = [];
+      // 1. Resolve choices that map directly to structured profile data.
+      const profileMappedIds = new Set<string>();
       for (const control of candidates) {
         const profileFacts = profile ? getRelevantProfileFacts(profile, control.question) : [];
         const relevantFormAnswers = getRelevantChoiceFormAnswers(
           control,
           formAnswers.map(({ question, answer }) => `${question}: ${answer}`),
         );
-        const memories = (memoryByControlId.get(control.id) ?? []).slice(0, 5);
-        const evidence: ChoiceEvidence = { profileFacts, memories, formAnswers: relevantFormAnswers };
+        const evidence: ChoiceEvidence = { profileFacts, memories: [], formAnswers: relevantFormAnswers };
         evidenceByControl.set(control.id, evidence);
 
+        const profileDecision = profile ? resolveChoiceFromProfile(control, profile) : null;
+        if (profileDecision && profileDecision.confidence >= 0.9) {
+          decisions.push(profileDecision);
+          profileMappedIds.add(control.id);
+          console.info(`[JobFill Choice] Tab ${tabId}: ${control.id} ✓ direct profile match`, {
+            selectedOptionIds: profileDecision.selectedOptionIds,
+          });
+        }
+      }
+
+      // 2. Ask AI to map remaining questions using profile facts only.
+      const profileMappingRequests = candidates
+        .filter((control) => !profileMappedIds.has(control.id))
+        .map((control) => ({ control, evidence: evidenceByControl.get(control.id)! }));
+      if (profileMappingRequests.length && profile) {
+        console.info(`[JobFill Choice] Tab ${tabId}: AI profile mapping for ${profileMappingRequests.length} unmatched controls`);
+        const profileMappingDecisions = await resolveChoicesWithAI(profileMappingRequests);
+        for (const decision of profileMappingDecisions) {
+          decisions.push(decision);
+          profileMappedIds.add(decision.controlId);
+        }
+      }
+
+      // 3. Retrieve personal memories only for unresolved questions, then consult the cache.
+      const unresolved = candidates.filter((control) => !profileMappedIds.has(control.id));
+      let userId: string | null = null;
+      if (unresolved.length) {
+        try {
+          userId = (await getCurrentUser())?.id ?? null;
+          console.info(`[JobFill Choice] Tab ${tabId}: user ID ${userId ? 'available' : 'unavailable'}`);
+        } catch (error) {
+          console.warn(`[JobFill Choice] Tab ${tabId}: user unavailable for choice memory lookup`, error);
+        }
+      }
+      if (profile && userId) void syncProfileToMemory(userId, profile).catch(console.error);
+
+      if (unresolved.length) {
+        console.info(`[JobFill Choice] Tab ${tabId}: querying Supermemory for ${unresolved.length} unresolved questions`);
+      }
+      const memoryResults = await Promise.all(unresolved.map(async (control) => {
+        if (!userId) return { control, matches: [] as string[] };
+        return { control, matches: await searchMemory(userId, control.question.trim()) };
+      }));
+      const memoryByControlId = new Map(memoryResults.map(({ control, matches }) => [control.id, matches.slice(0, 5)]));
+      const memoryRequests: Array<{ control: ChoiceControl; evidence: ChoiceEvidence }> = [];
+      const decisionIds = new Set(decisions.map((decision) => decision.controlId));
+      for (const control of unresolved) {
+        const evidence = evidenceByControl.get(control.id);
+        if (!evidence) continue;
+        evidence.memories = memoryByControlId.get(control.id) ?? [];
         const cached = await getCachedChoice(control, evidence);
         if (cached) {
           decisions.push(cached);
+          decisionIds.add(control.id);
           console.info(`[JobFill Choice] Tab ${tabId}: ${control.id} ✓ resolved from choice cache`, {
             selectedOptionIds: cached.selectedOptionIds,
             confidence: cached.confidence,
           });
           continue;
         }
-
-        aiRequests.push({ control, evidence });
+        memoryRequests.push({ control, evidence });
       }
 
-      // 3. AI-First Resolution: Send all uncached controls to OpenRouter with full profile facts and Supermemory chunks
-      if (aiRequests.length) {
-        console.info(`[JobFill Choice] Tab ${tabId}: sending ${aiRequests.length} controls to OpenRouter AI resolver`, aiRequests.map(({ control }) => ({ id: control.id, question: control.question })));
-        const aiDecisions = await resolveChoicesWithAI(aiRequests);
-        console.info(`[JobFill Choice] Tab ${tabId}: OpenRouter resolved ${aiDecisions.length}/${aiRequests.length} controls`, aiDecisions.map((d) => ({ controlId: d.controlId, selectedOptionIds: d.selectedOptionIds, confidence: d.confidence })));
+      // 4. Evaluate the remaining options with profile, form, and retrieved memory evidence.
+      if (memoryRequests.length) {
+        console.info(`[JobFill Choice] Tab ${tabId}: OpenRouter evaluating ${memoryRequests.length} memory-backed controls`);
+        const aiDecisions = await resolveChoicesWithAI(memoryRequests);
         for (const decision of aiDecisions) {
           const control = candidates.find((item) => item.id === decision.controlId);
           const evidence = evidenceByControl.get(decision.controlId);
           if (control && evidence) await cacheChoice(control, evidence, decision);
           decisions.push(decision);
+          decisionIds.add(decision.controlId);
         }
       }
 
-      // 4. Fallback for any controls not resolved by AI (e.g. offline, rate-limited, or placeholder key)
-      const decisionIds = new Set(decisions.map((d) => d.controlId));
-      for (const control of candidates) {
+      // 5. Keep deterministic fallbacks available when AI is unavailable or evidence is explicit.
+      for (const control of unresolved) {
         if (decisionIds.has(control.id)) continue;
         const evidence = evidenceByControl.get(control.id);
         if (!evidence) continue;
@@ -555,21 +583,7 @@ async function runChoicePipeline(tabId: number, frameId: number, url: string): P
           continue;
         }
 
-        // Fallback 2: Optimistic job availability / screening
-        const screeningDecision = resolveOptimisticJobAvailability(control, [
-          ...evidence.profileFacts,
-          ...evidence.memories,
-          ...evidence.formAnswers,
-        ]);
-        if (screeningDecision && screeningDecision.confidence >= 0.85) {
-          decisions.push(screeningDecision);
-          await cacheChoice(control, evidence, screeningDecision);
-          decisionIds.add(control.id);
-          console.info(`[JobFill Choice] Tab ${tabId}: ${control.id} ✓ fallback resolved via optimistic screening`, { selectedOptionIds: screeningDecision.selectedOptionIds });
-          continue;
-        }
-
-        // Fallback 3: Memory / Form evidence heuristic
+                // Fallback 2: Memory / Form evidence heuristic
         const evidenceDecision = resolveChoiceFromEvidence(control, [...evidence.memories, ...evidence.formAnswers]);
         if (evidenceDecision && evidenceDecision.confidence >= 0.85) {
           decisions.push(evidenceDecision);
@@ -914,7 +928,6 @@ async function runPrescanPipeline(tabId: number, googleFormsFrameId?: number): P
 
     if (isGoogleForm) await clearQuestionState(tabId);
     else await runQuestionPipeline(tabId, frameId, scanResult.url, scanResult.fields);
-    void runChoicePipeline(tabId, frameId, scanResult.url);
     try {
       await runFileUploadPipeline(tabId, frameId, scanResult.url, scanResult.fields);
     } catch (error) {

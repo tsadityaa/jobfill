@@ -3,7 +3,7 @@ import type { DetectedField } from '../types/autofill';
 const QUESTION_SIGNAL = /\b(?:why|describe|explain|tell\s+us\s+about|what|how|please\s+provide|share|elaborate)\b|\?/i;
 const LINK_SIGNAL = /\b(?:links?|urls?)\b/i;
 const LINK_REQUEST_SIGNAL = /\b(?:provide|share|add|enter|paste|submit|include|list|give|attach)\b/i;
-const LINK_PROFILE_CONTEXT_SIGNAL = /\b(?:profile|portfolio|website|repository|project|github|linkedin|leetcode|hackerrank)\b/i;
+const LINK_PROFILE_CONTEXT_SIGNAL = /\b(?:profile|portfolio|website|repository|project|github|linkedin|leetcode|hackerrank|resume|résumé|cv|curriculum\s*vitae)\b/i;
 const TEXT_INPUT_TYPES = new Set(['text', 'textarea', 'search']);
 
 export function isLinkRequestQuestion(question: string): boolean {

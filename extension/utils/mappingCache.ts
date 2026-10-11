@@ -19,10 +19,12 @@ import type { ScanResult, FieldMapping } from '../types/autofill';
 const CACHE_KEY = 'jf_map_cache';
 const TAB_RESULT_KEY = 'jf_tab_results';
 const MAX_CACHE_ENTRIES = 50; // keep storage bounded
+export const PRESCAN_PIPELINE_VERSION = 2;
 export const GOOGLE_FORM_MAPPING_VERSION = 12;
 
 export interface CachedMapping {
   fingerprint: string;
+  pipelineVersion?: number;
   aiMappings: FieldMapping[];
   aiMappedCount: number;
   googleFormMappingVersion?: number;
@@ -33,6 +35,7 @@ export interface CachedMapping {
 
 export interface TabPrescanResult {
   tabId: number;
+  pipelineVersion?: number;
   /** null while still computing */
   scanResult: ScanResult | null;
   aiMappings: FieldMapping[];
@@ -70,6 +73,7 @@ export async function getCachedMapping(fingerprint: string): Promise<CachedMappi
   const cache = await readFingerprintCache();
   const entry = cache[fingerprint];
   if (!entry) return null;
+  if (entry.pipelineVersion !== PRESCAN_PIPELINE_VERSION) return null;
 
   const age = Date.now() - new Date(entry.cachedAt).getTime();
   if (age > TTL_MS) {
@@ -85,7 +89,7 @@ export async function getCachedMapping(fingerprint: string): Promise<CachedMappi
 /** Store an AI mapping result for a fingerprint. Evicts oldest if over limit. */
 export async function setCachedMapping(entry: CachedMapping): Promise<void> {
   const cache = await readFingerprintCache();
-  cache[entry.fingerprint] = entry;
+  cache[entry.fingerprint] = { ...entry, pipelineVersion: PRESCAN_PIPELINE_VERSION };
 
   // Evict oldest entries if over limit
   const keys = Object.keys(cache);
@@ -120,14 +124,15 @@ async function writeTabResults(store: TabResultStore): Promise<void> {
 /** Store a pre-scan result (or in-progress placeholder) for a tab. */
 export async function setTabResult(result: TabPrescanResult): Promise<void> {
   const store = await readTabResults();
-  store[result.tabId] = result;
+  store[result.tabId] = { ...result, pipelineVersion: PRESCAN_PIPELINE_VERSION };
   await writeTabResults(store);
 }
 
 /** Get the pre-scan result for a tab. Returns null if not found. */
 export async function getTabResult(tabId: number): Promise<TabPrescanResult | null> {
   const store = await readTabResults();
-  return store[tabId] ?? null;
+  const result = store[tabId];
+  return result?.pipelineVersion === PRESCAN_PIPELINE_VERSION ? result : null;
 }
 
 /** Clear the result for a specific tab (e.g. on navigation). */

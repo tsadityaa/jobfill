@@ -21,8 +21,10 @@ Rules:
 2. Only use intent keys from the provided list. Do NOT invent new ones.
 3. If a field clearly doesn't match any intent key, set it to null.
 4. Use ALL available clues: label text, placeholder, name attribute, input type, autocomplete attribute.
-5. Be accurate — a wrong mapping is worse than no mapping (null).
-6. Common tricky cases:
+5. Interpret labels semantically, including synonyms, regional terminology, abbreviations, question numbering, and helper text. Do not require an exact label match.
+6. Map only when the intent key represents the requested value. Do not map a derived answer (such as a year extracted from a date) to a key that would fill a different value; return null so the grounded answer pipeline can resolve it from profile evidence.
+7. Be accurate — a wrong mapping is worse than no mapping (null).
+8. Common tricky cases:
    - "number" or "contact" with type "tel" → phones.primary
    - "entry.XXXXX" fields (Google Forms) → look at the label text
   - A field labeled only "Name", with no first-name or last-name qualifier → personal.fullName
@@ -30,6 +32,7 @@ Rules:
    - "university" or "college" → education.latest.institution
   - Expected date of joining or expected start date → application.expectedJoiningDate
   - Keep date of birth, education dates, employment dates, and expected joining date distinct.
+  - Do not substitute a "latest" value for a question asking for a "highest" or "most advanced" value unless the intent key guarantees that meaning.
 
 Respond with ONLY valid JSON, no markdown, no explanation:
 {

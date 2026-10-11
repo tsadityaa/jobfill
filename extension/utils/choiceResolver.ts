@@ -35,7 +35,6 @@ export function inferDegreeLevel(degree: string): string {
 
 function getFacts(profile: UserProfile): Array<{ section: string; value: string }> {
   const fullName = [profile.personal.firstName, profile.personal.middleName, profile.personal.lastName].filter(Boolean).join(' ');
-  const firstName = profile.personal.firstName?.trim() || '';
   const currentExperiences = profile.experience.filter((item) => item.current || !item.endDate || /present|current|now/i.test(item.endDate));
   const isCurrentlyEmployed = currentExperiences.length > 0;
 
@@ -48,10 +47,11 @@ function getFacts(profile: UserProfile): Array<{ section: string; value: string 
   return [
     // Personal & Identity
     { section: 'personal', value: `Full Name: ${fullName}` },
-    ...(firstName ? [{ section: 'personal', value: `First Name: ${firstName}` }] : []),
     {
       section: 'personal',
-      value: `Gender: ${profile.personal.gender?.trim() ? profile.personal.gender.trim() : `Not explicitly set in settings (infer from candidate first name "${firstName}")`}`,
+      value: profile.personal.gender?.trim()
+        ? `Gender: ${profile.personal.gender.trim()}`
+        : 'Gender: Not explicitly set in profile settings',
     },
     ...(profile.personal.dateOfBirth ? [{ section: 'personal', value: `Date of Birth: ${profile.personal.dateOfBirth}` }] : []),
 
@@ -61,8 +61,8 @@ function getFacts(profile: UserProfile): Array<{ section: string; value: string 
       value: isCurrentlyEmployed
         ? `Current Employment Status: Employed (Currently working as ${currentExperiences.map((e) => [e.title, e.company].filter(Boolean).join(' at ')).join(', ')})`
         : profile.experience.length > 0
-          ? `Current Employment Status: Not currently employed / Seeking employment (Previous roles: ${profile.experience.map((e) => [e.title, e.company].filter(Boolean).join(' at ')).join(', ')})`
-          : 'Current Employment Status: Student / Fresher / Seeking Entry-level Role',
+          ? `Current Employment Status: No current role is marked in profile (Previous roles: ${profile.experience.map((e) => [e.title, e.company].filter(Boolean).join(' at ')).join(', ')})`
+          : 'No employment history is recorded in the profile',
     },
 
     // Detailed Work Experience
@@ -114,12 +114,6 @@ function getFacts(profile: UserProfile): Array<{ section: string; value: string 
     // Professional links
     { section: 'professional', value: `Links: ${[profile.professional.linkedin, profile.professional.github, profile.professional.portfolio].filter(Boolean).join(' | ')}` },
 
-    // Affirmative Job Screening Stances
-    { section: 'screening_intent', value: 'Willingness to Relocate: Yes, willing and ready to relocate for work or internship.' },
-    { section: 'screening_intent', value: 'Work Mode: Willing and comfortable working on-site, hybrid, and remote.' },
-    { section: 'screening_intent', value: 'Availability & Internship: Available immediately, open to 6-month internships and full-time positions.' },
-    { section: 'screening_intent', value: 'Work Authorization: Legally authorized to work without restrictions; does NOT require visa sponsorship.' },
-    { section: 'screening_intent', value: 'Declarations & Background Checks: Consents to background checks and drug screenings; confirms statements are truthful.' },
   ].filter((fact) => fact.value.trim());
 }
 
@@ -468,6 +462,7 @@ export async function resolveChoicesWithAI(requests: AIChoiceRequest[]): Promise
             role: 'system',
             content: `You are an expert AI job-application assistant that accurately selects the right choices (radio buttons, checkboxes) for job application forms on behalf of the applicant.
 Analyze the applicant's profile facts, relevant retrieved memories from Supermemory, and answers from the same form.
+Use only information supported by the supplied evidence. Never guess or infer missing personal facts; if the evidence does not support a choice, omit that control from results so a later evidence source can be tried.
 
 CRITICAL DECISION-MAKING GUIDELINES:
 
@@ -491,32 +486,20 @@ CRITICAL DECISION-MAKING GUIDELINES:
 
 3. Gender & Demographics:
 - If gender is explicitly listed in profile evidence, use it.
-- If gender is not explicitly stated in profile settings, INFER the gender from the candidate's first name (e.g., Aditya/Adithya, Rahul, Amit, Rohan -> Male; Priya, Ananya, Sneha, Pooja -> Female; John, David, Michael -> Male; Sarah, Emily, Jessica -> Female).
-- When the name or profile clearly indicates gender, ALWAYS select the matching option ("Male" or "Female") with high confidence (0.95+).
-- Do NOT select "I choose not to disclose", "Prefer not to say", or "Decline to state" for gender when the name clearly identifies the applicant.
-- ONLY select "Choose not to disclose" / "Prefer not to say" for voluntary demographic disclosures like disability or veteran status where no facts exist in the profile or memories.
+- Never infer gender or any other demographic trait from a name. If the evidence does not explicitly state it, omit that control from results.
 
 4. Screening, Availability, & Qualification Questions (Advancing the Application):
-- The applicant wants to qualify and be shortlisted for the position!
-- For questions regarding:
-  * Willingness to relocate -> Select "Yes"
-  * Willingness to work on-site or hybrid -> Select "Yes"
-  * Availability to start immediately / notice period -> Select "Yes" (or immediate / least notice period)
-  * Commitment to internship or program duration (e.g. 6 months) -> Select "Yes"
-  * Legal authorization to work in the country -> Select "Yes"
-  * Passing background check / drug test -> Select "Yes"
-  * Agreement to terms and truthfulness of application -> Select "Yes"
-  * Requiring visa sponsorship -> Select "No" (unless explicit profile/memory evidence says the applicant needs sponsorship).
-- NEVER pick a disqualifying negative answer ("No") to screening questions unless supplied profile/memory evidence explicitly demands it.
+- Use explicit profile, memory, or same-form evidence for screening answers; do not choose an answer merely because it may improve the applicant's candidacy.
+- For visa sponsorship, select "No" only when supplied evidence establishes that sponsorship is not required.
 
 5. Dynamic Question Understanding:
 - For any novel, arbitrary, or company-specific questions (e.g. "Have you ever worked at IBM before?", "Do you have experience with Python?", "How did you hear about us?"):
   * Reason carefully over the profile facts, work history, skills, and Supermemory chunks.
-  * Pick the option that best accurately reflects the applicant's history and maximizes their candidacy.
+  * Pick an option only when supplied evidence supports it; never optimize by inventing or assuming applicant history.
 
 6. Output Format & Constraints:
 - You must return ONLY options from the provided "options" list using their exact "id".
-- For single-choice ("multiple": false, or radio buttons): select EXACTLY ONE option ID that is the best match.
+- For single-choice ("multiple": false, or radio buttons): select EXACTLY ONE option ID only when supported by evidence; otherwise omit that control from results.
 - For multi-choice ("multiple": true, or checkboxes): select all matching option IDs.
 - Return strictly JSON: {"results":[{"control_id":"...","selected_option_ids":["..."],"confidence":0.95}]}. Use confidence from 0 to 1.`,
           },

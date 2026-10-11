@@ -3,7 +3,9 @@ import { isLinkRequestQuestion } from './questionDetector';
 
 const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
 
-export function formatProfileAnswerContext(profile: UserProfile): string {
+export function formatProfileAnswerContext(profile: UserProfile, question = ''): string {
+  const asksForLocation = /\b(location|city|state|country|address|resid(?:e|ence)|live)\b/i.test(question);
+  const asksForEducationYear = /\b(pass[\s-]?out|graduat(?:e|ion|ing)|completion|year of (?:passing|completion))\b/i.test(question);
   const facts = [
     profile.professional.skills.length > 0 ? `Skills: ${profile.professional.skills.join(', ')}` : '',
     ...profile.experience.map((experience) => {
@@ -14,8 +16,13 @@ export function formatProfileAnswerContext(profile: UserProfile): string {
     }),
     ...profile.education.map((education) => {
       const details = [education.degree, education.field, education.institution].filter(Boolean).join(' in ');
-      return details ? `Education: ${details}` : '';
+      const dates = asksForEducationYear && education.endDate ? `; completion date: ${education.endDate}` : '';
+      return details ? `Education: ${details}${dates}` : '';
     }),
+    ...(asksForLocation ? profile.addresses.map((address) => {
+      const location = [address.city, address.state, address.country].filter(Boolean).join(', ');
+      return location ? `Saved ${address.label.toLowerCase()} location: ${location}` : '';
+    }) : []),
     profile.professional.portfolio ? `Portfolio: ${profile.professional.portfolio}` : '',
     profile.professional.github ? `GitHub: ${profile.professional.github}` : '',
     profile.professional.linkedin ? `LinkedIn: ${profile.professional.linkedin}` : '',
@@ -49,6 +56,22 @@ function canonicalizeHttpUrl(value: string): string | undefined {
     return url.href.toLowerCase();
   } catch {
     return undefined;
+  }
+}
+
+function normalizeApplicationAnswer(value: string): string {
+  const answer = value.trim().replace(/^```(?:json)?\s*|\s*```$/g, '').trim();
+  if (!answer.startsWith('{')) return answer;
+
+  try {
+    const parsed = JSON.parse(answer) as Record<string, unknown>;
+    for (const key of ['answer', 'response', 'value', 'text']) {
+      const nested = parsed[key];
+      if (typeof nested === 'string') return normalizeApplicationAnswer(nested);
+    }
+    return '';
+  } catch {
+    return answer;
   }
 }
 
@@ -136,7 +159,7 @@ export async function generateApplicationAnswer(question: string, memories: stri
       messages: [
         {
           role: 'system',
-          content: 'First classify the question. If it asks for a direct personal/profile fact (for example name, contact details, current location/address, current employer/company, date of birth, or graduation year), answer with only the exact requested value found in the supplied profile facts or relevant memories. Do not add first-person wording, explanations, or unrelated facts. Preserve saved addresses and other personal values exactly as stored. For graduation-year questions, return only the explicit four-digit year; for employer questions, return only the company name. Do not infer or invent missing facts; return an empty string if the requested value is unavailable. For open-ended questions (for example why the candidate should be hired), write a concise, specific first-person answer grounded in supplied skills and experience. Do not invent projects, experience, metrics, motivations, or claims; avoid generic filler.',
+          content: 'First classify the question. If it asks for a direct personal/profile fact (for example name, contact details, current location/address, current employer/company, date of birth, or graduation year), answer with only the exact requested value supported by the supplied profile facts or relevant memories. For highest-education questions, choose the most advanced degree explicitly listed. For graduation/pass-out-year questions, return only the explicit four-digit completion year from education facts. Do not add first-person wording, explanations, or unrelated facts. Preserve saved addresses and other personal values exactly as stored. For employer questions, return only the company name. Do not infer or invent missing facts; return an empty string if the requested value is unavailable. For open-ended questions (for example why the candidate should be hired), write a concise, specific first-person answer grounded in supplied skills and experience. Do not invent projects, experience, metrics, motivations, or claims; avoid generic filler.',
         },
         {
           role: 'user',
@@ -151,7 +174,7 @@ export async function generateApplicationAnswer(question: string, memories: stri
   if (!response.ok) throw new Error(`OpenRouter request failed (${response.status}).`);
   const data = await response.json();
   const answer = data?.choices?.[0]?.message?.content;
-  return typeof answer === 'string' ? answer.trim() : '';
+  return typeof answer === 'string' ? normalizeApplicationAnswer(answer) : '';
 }
 
 export interface ApplicationAnswerRequest {
