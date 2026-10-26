@@ -6,6 +6,11 @@
   "workspaces": [
     "extension"
   ],
+  "scripts": {
+    "dev": "npm --workspace=extension run dev",
+    "build": "npm --workspace=extension run build",
+    "clean:logs": "rm -f extension-dev.log extension/extension-dev.log"
+  },
   "allowScripts": {
     "esbuild@0.28.2": true
   }

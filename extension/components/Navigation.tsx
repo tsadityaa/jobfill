@@ -34,18 +34,22 @@ export default function Navigation({ activeTab, onTabChange }: NavigationProps) 
   });
 
   useEffect(() => {
-    if (!navRef.current) return;
-    const activeButton = navRef.current.querySelector(
-      `[data-tab="${activeTab}"]`,
-    ) as HTMLElement | null;
-    if (activeButton) {
-      const navRect = navRef.current.getBoundingClientRect();
-      const btnRect = activeButton.getBoundingClientRect();
-      setIndicatorStyle({
-        left: btnRect.left - navRect.left,
-        width: btnRect.width,
-      });
-    }
+    const updateIndicator = () => {
+      if (!navRef.current) return;
+      const activeButton = navRef.current.querySelector(
+        `[data-tab="${activeTab}"]`,
+      ) as HTMLElement | null;
+      if (activeButton) {
+        setIndicatorStyle({
+          left: activeButton.offsetLeft,
+          width: activeButton.offsetWidth,
+        });
+      }
+    };
+
+    updateIndicator();
+    window.addEventListener('resize', updateIndicator);
+    return () => window.removeEventListener('resize', updateIndicator);
   }, [activeTab]);
 
   return (
@@ -65,6 +69,7 @@ export default function Navigation({ activeTab, onTabChange }: NavigationProps) 
       <div
         className="nav-indicator"
         style={{
+          left: 0,
           transform: `translateX(${indicatorStyle.left}px)`,
           width: `${indicatorStyle.width}px`,
         }}

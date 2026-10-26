@@ -30,20 +30,71 @@ export async function backendFetch(path: string, init: RequestInit = {}): Promis
   return fetch(`${BACKEND_URL}${path}`, { ...init, headers });
 }
 
+/**
+ * Helper: call OpenRouter directly using the local API key (no auth needed).
+ * Returns null if no key is configured.
+ */
+function directOpenRouterFetch(payload: unknown, signal?: AbortSignal): Promise<Response> | null {
+  if (!OPENROUTER_KEY || OPENROUTER_KEY === 'xyzz') return null;
+  return fetch(OPENROUTER_URL, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${OPENROUTER_KEY}`,
+      'Content-Type': 'application/json',
+      'HTTP-Referer': 'http://localhost:3000',
+      'X-Title': 'Personal Copilot Extension',
+    },
+    body: JSON.stringify(payload),
+    signal,
+  });
+}
+
 export async function requestOpenRouter(payload: unknown, signal?: AbortSignal): Promise<Response> {
-  if (!BACKEND_URL && OPENROUTER_KEY && OPENROUTER_KEY !== 'xyzz') {
-    return fetch(OPENROUTER_URL, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${OPENROUTER_KEY}`,
-        'Content-Type': 'application/json',
-        'HTTP-Referer': 'http://localhost:3000',
-        'X-Title': 'Personal Copilot Extension',
-      },
-      body: JSON.stringify(payload),
-      signal,
-    });
+  const MAX_RETRIES = 3;
+  const BASE_DELAY_MS = 2000;
+  const hasDirectKey = Boolean(OPENROUTER_KEY && OPENROUTER_KEY !== 'xyzz');
+
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    let response: Response;
+
+    if (!BACKEND_URL && hasDirectKey) {
+      // No backend configured — go direct
+      response = await directOpenRouterFetch(payload, signal)!;
+    } else if (BACKEND_URL) {
+      // Backend configured — try it, but fall back to direct key on auth failure
+      try {
+        response = await backendFetch('/api/openrouter', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+          signal,
+        });
+      } catch (err) {
+        // Auth failed (session lost after extension reload) — fall back to direct key
+        if (hasDirectKey) {
+          console.warn('[JobFill OpenRouter] Backend auth failed, falling back to direct OpenRouter API key:', (err as Error).message);
+          response = await directOpenRouterFetch(payload, signal)!;
+        } else {
+          throw err;
+        }
+      }
+    } else {
+      throw new Error('No OpenRouter backend or API key configured.');
+    }
+
+    // Retry on rate-limit (429) or model overloaded (503)
+    if ((response.status === 429 || response.status === 503) && attempt < MAX_RETRIES) {
+      const delay = BASE_DELAY_MS * Math.pow(2, attempt); // 2s, 4s, 8s
+      console.warn(`[JobFill OpenRouter] HTTP ${response.status} — model overloaded/rate-limited, retrying in ${delay}ms (attempt ${attempt + 1}/${MAX_RETRIES})`);
+      await new Promise((resolve) => setTimeout(resolve, delay));
+      continue;
+    }
+
+    return response;
   }
+
+  // Should never reach here, but just in case — make the final request without retry
+  if (hasDirectKey) return directOpenRouterFetch(payload, signal)!;
   return backendFetch('/api/openrouter', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

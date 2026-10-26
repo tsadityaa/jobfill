@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { isDropdownAIEnabled, setDropdownAIEnabled } from '../utils/dropdownSettings';
 import ScanLoader from './ScanLoader';
 import type { UserProfile } from '../types/profile';
 import type { ScanResult, AutofillResult, FieldMapping } from '../types/autofill';
@@ -17,6 +18,18 @@ interface AutofillButtonProps {
 }
 
 type AutofillState = 'idle' | 'scanning' | 'ai_mapping' | 'filling' | 'filled' | 'error';
+
+async function sendToMainFrame<T>(tabId: number, message: unknown): Promise<T> {
+  try {
+    return await chrome.tabs.sendMessage(tabId, message, { frameId: 0 }) as T;
+  } catch {
+    await chrome.scripting.executeScript({
+      target: { tabId, frameIds: [0] },
+      files: ['content-scripts/content.js'],
+    });
+    return await chrome.tabs.sendMessage(tabId, message, { frameId: 0 }) as T;
+  }
+}
 
 /**
  * Send a message to the relevant frames in a tab and collect responses.
@@ -38,7 +51,7 @@ async function sendToAllFrames<T>(
   const results: T[] = [];
   // Step 1: Try main frame first (frameId 0)
   try {
-    const mainResponse = await chrome.tabs.sendMessage(tabId, message, { frameId: 0 });
+    const mainResponse = await sendToMainFrame<T>(tabId, message);
     if (mainResponse) {
       const response = mainResponse as {
         type?: string;
@@ -111,11 +124,22 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
   const [state, setState] = useState<AutofillState>('idle');
   const [scanResult, setScanResult] = useState<ScanResult | null>(null);
   const [fillResult, setFillResult] = useState<AutofillResult | null>(null);
+  const [dropdownSummary, setDropdownSummary] = useState<{ detectedCount: number; filledCount: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [aiMappedCount, setAiMappedCount] = useState(0);
   const [questionTasks, setQuestionTasks] = useState<QuestionTask[]>([]);
   const [questionWatchTabId, setQuestionWatchTabId] = useState<number | null>(null);
   const [fileUploadTasks, setFileUploadTasks] = useState<FileUploadTask[]>([]);
+  const [dropdownAI, setDropdownAI] = useState(true);
+
+  useEffect(() => {
+    void isDropdownAIEnabled().then(setDropdownAI);
+  }, []);
+
+  const toggleDropdownAI = (enabled: boolean) => {
+    setDropdownAI(enabled);
+    void setDropdownAIEnabled(enabled);
+  };
 
   useEffect(() => {
     if (questionWatchTabId === null) return;
@@ -147,7 +171,17 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
   useEffect(() => {
     const handleFormStructureUpdated = (message: unknown) => {
       if (!message || typeof message !== 'object') return;
-      const notice = message as { type?: string; tabId?: number };
+      const notice = message as { type?: string; tabId?: number; detectedCount?: number; filledCount?: number };
+      if (notice.type === 'DROPDOWN_PIPELINE_RESULT') {
+        void chrome.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
+          if (tab?.id !== notice.tabId) return;
+          setDropdownSummary({
+            detectedCount: notice.detectedCount ?? 0,
+            filledCount: notice.filledCount ?? 0,
+          });
+        });
+        return;
+      }
       if (notice.type !== 'FORM_STRUCTURE_UPDATED') return;
 
       void chrome.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
@@ -155,6 +189,7 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
         setState('idle');
         setScanResult(null);
         setFillResult(null);
+        setDropdownSummary(null);
         setError(null);
         setAiMappedCount(0);
         setQuestionTasks([]);
@@ -178,6 +213,7 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
     void chrome.runtime.sendMessage({ type: 'TRIGGER_AUTOFILL', tabId, profileMappingPending: mappingIsPending });
     void chrome.runtime.sendMessage({ type: 'TRIGGER_FILE_UPLOADS', tabId });
     void chrome.runtime.sendMessage({ type: 'TRIGGER_CHOICE_AUTOFILL', tabId });
+    void chrome.runtime.sendMessage({ type: 'TRIGGER_DROPDOWN_AUTOFILL', tabId });
     const regexMappings = createFieldMappings(result.fields, profile);
     const regexSelectors = new Set(regexMappings.map((mapping) => mapping.selector));
     const combinedMappings = [
@@ -236,6 +272,7 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
     setError(null);
     setScanResult(null);
     setFillResult(null);
+    setDropdownSummary(null);
     setAiMappedCount(0);
     setQuestionTasks([]);
     setQuestionWatchTabId(null);
@@ -253,7 +290,7 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
         const deadline = Date.now() + maxMs;
         while (true) {
           const r = await getTabResult(tab.id!);
-          if (r && (r.status !== 'running' || r.scanResult)) return r;
+          if (r && r.status !== 'running') return r;
           if (Date.now() >= deadline) return r;
           await new Promise((res) => setTimeout(res, 150));
         }
@@ -288,6 +325,9 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
         console.log('[AutofillButton] Requesting background pre-scan...');
         await chrome.runtime.sendMessage({ type: 'REQUEST_PRESCAN', tabId: tab.id });
         cached = await waitForCache(30000);
+        if (cached?.status === 'running') {
+          throw new Error('The form scan is still running. Wait for it to finish before filling.');
+        }
       }
 
       if (cached?.scanResult && cached.scanResult.totalFields > 0) {
@@ -315,8 +355,7 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
           unknownFields: fields.filter((field) => field.category === 'UNKNOWN').length,
         };
 
-        const mappingIsPending = cached.status === 'running'
-          && !cached.aiMappingComplete
+        const mappingIsPending = cached.aiMappingComplete === false
           && cachedScanResult.unknownFields > 0;
         await fillPreparedWork(tab.id, cachedScanResult, resolvedCachedMappings, mappingIsPending);
         return;
@@ -337,6 +376,26 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
       const validResponses = scanResponses.filter((r) => r?.type === 'SCAN_FIELDS_RESULT' && r.result.totalFields > 0);
 
       if (validResponses.length === 0) {
+        if (tab.url?.includes('myworkdayjobs.com')) {
+          const dropdownResponse = await chrome.tabs.sendMessage(
+            tab.id,
+            { type: 'DROPDOWN_SCAN' },
+            { frameId: 0 },
+          ).catch(() => null) as { controls?: unknown[] } | null;
+
+          if (dropdownResponse?.controls?.length) {
+            await fillPreparedWork(tab.id, {
+              url: tab.url,
+              totalFields: 0,
+              mappedFields: 0,
+              sensitiveFields: 0,
+              unknownFields: 0,
+              fields: [],
+            }, [], false);
+            return;
+          }
+        }
+
         throw new Error('No form fields found. Try refreshing the page.');
       }
 
@@ -464,6 +523,7 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
     setState('idle');
     setScanResult(null);
     setFillResult(null);
+    setDropdownSummary(null);
     setError(null);
     setAiMappedCount(0);
     setQuestionTasks([]);
@@ -480,7 +540,7 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
             <>
               <div className="autofill-result-row">
                 <span className="label">Fields detected</span>
-                <span className="value">{scanResult.totalFields}</span>
+                <span className="value">{scanResult.totalFields + (dropdownSummary?.detectedCount ?? 0)}</span>
               </div>
               <div className="autofill-result-row">
                 <span className="label">Profile matches</span>
@@ -496,7 +556,7 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
           )}
           <div className="autofill-result-row">
             <span className="label">Fields filled</span>
-            <span className="value success">✓ {fillResult.filledFields}</span>
+            <span className="value success">✓ {fillResult.filledFields + (dropdownSummary?.filledCount ?? 0)}</span>
           </div>
           {fillResult.skippedExisting > 0 && (
             <div className="autofill-result-row">
@@ -538,6 +598,20 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
           </div>
         </div>
       )}
+
+      <label
+        className="autofill-result-row"
+        style={{ marginBottom: '8px', cursor: 'pointer' }}
+        title="When off, dropdowns that need AI are left blank. Rule-based and saved answers still fill."
+      >
+        <span className="label">AI dropdown selection (slower)</span>
+        <input
+          id="toggle-dropdown-ai"
+          type="checkbox"
+          checked={dropdownAI}
+          onChange={(event) => toggleDropdownAI(event.target.checked)}
+        />
+      </label>
 
       {/* Action Buttons */}
       {state === 'idle' && (

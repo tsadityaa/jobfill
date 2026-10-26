@@ -11,6 +11,7 @@ import type { SanitizedField, FieldIdLookup } from './aiMapper';
 import type { JobPageClassification } from '../utils/jobPageDetector';
 import type { QuestionTask } from './questionTask';
 import type { ChoiceApplyRequest, ChoiceApplyResponse, ChoiceScanRequest, ChoiceScanResponse } from './choice';
+import type { DropdownApplyRequest, DropdownApplyResponse, DropdownPipelineResult, DropdownScanRequest, DropdownScanResponse, TriggerDropdownAutofillRequest } from './dropdown';
 
 // ---- Request Messages (popup/background → content script) ----
 
@@ -175,6 +176,12 @@ export type ExtensionMessage =
   | ChoiceScanResponse
   | ChoiceApplyResponse
   | TriggerChoiceAutofillRequest
+  | DropdownScanRequest
+  | DropdownApplyRequest
+  | DropdownScanResponse
+  | DropdownApplyResponse
+  | DropdownPipelineResult
+  | TriggerDropdownAutofillRequest
   | QuestionTasksResponse;
 
 export type ContentScriptRequest =
@@ -188,7 +195,9 @@ export type ContentScriptRequest =
   | FillQuestionAnswerRequest
   | SetQuestionPendingRequest
   | ChoiceScanRequest
-  | ChoiceApplyRequest;
+  | ChoiceApplyRequest
+  | DropdownScanRequest
+  | DropdownApplyRequest;
 
 export type ContentScriptResponse =
   | ScanFieldsResponse
@@ -197,4 +206,8 @@ export type ContentScriptResponse =
   | DetectJobPageResponse
   | WaitForFormReadyResponse
   | PrescanResponse
-  | InjectFileResponse;
+  | InjectFileResponse
+  | ChoiceScanResponse
+  | ChoiceApplyResponse
+  | DropdownScanResponse
+  | DropdownApplyResponse;

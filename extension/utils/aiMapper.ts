@@ -22,13 +22,30 @@ Rules:
 4. Use ALL available clues: label text, placeholder, name attribute, input type, autocomplete attribute.
 5. Be accurate — a wrong mapping is worse than no mapping (null).
 6. Common tricky cases:
-   - "number" or "contact" with type "tel" → phones.primary
+   - "phone", "mobile", "whatsapp", or "contact" with type "tel" → contact.primaryPhoneNumber
+   - "email" or "email address" → contact.primaryEmailAddress (or university / personal if explicitly qualified)
    - "entry.XXXXX" fields (Google Forms) → look at the label text
-  - A field labeled only "Name", with no first-name or last-name qualifier → personal.fullName
-  - A "Name" field with a hint like "First and last name" → personal.fullName
-   - "university" or "college" → education.latest.institution
-  - Expected date of joining or expected start date → application.expectedJoiningDate
-  - Keep date of birth, education dates, employment dates, and expected joining date distinct.
+   - A field labeled only "Name", with no first-name or last-name qualifier → personal.fullName
+   - A "Name" field with a hint like "First and last name" → personal.fullName
+   - "gender" or "sex" → personal.gender
+   - "university", "college", or "institute" → education.current.institutionName
+   - "12th", "twelfth", "PUC", "HSC", "junior college", or "intermediate" school/college → education.twelfth.institutionName
+   - "12th", "twelfth", "PUC", "HSC", or "intermediate" percentage/score/marks → education.twelfth.percentage
+   - "12th", "twelfth", "PUC", "HSC", or "intermediate" passing year → education.twelfth.passingYear
+   - "10th", "tenth", "SSLC", "matriculation", or "high school" school name → education.tenth.institutionName
+   - "10th", "tenth", "SSLC", "matriculation", or "high school" percentage/score/marks → education.tenth.percentage
+   - "10th", "tenth", "SSLC", "matriculation", or "high school" passing year → education.tenth.passingYear
+   - "registration number", "roll number", "student ID", or "USN" → education.current.registrationNumber
+   - "degree" or "qualification" → education.current.degree
+   - "department", "major", or "branch" → education.current.fieldOfStudy
+   - Education level in the label picks the matching keys: "UG", "undergraduate", "bachelor", "B.Tech", "graduation" → education.ug.*; "PG", "postgraduate", "master", "M.Tech", "MBA" → education.pg.*; "PhD", "doctorate", "post doctoral" → education.phd.*. Example: "PG college" → education.pg.institutionName, "UG CGPA" → education.ug.gpaOrPercentage.
+   - "highest qualification", "highest degree", or "highest education" → education.highest.* (e.g. education.highest.degree).
+   - Plain "college", "degree", "branch", "CGPA" with no level → education.current.* (current entry, else highest).
+   - "LinkedIn" or "LinkedIn profile" → professional.linkedinProfileUrl
+   - "GitHub" or "GitHub profile" → professional.githubProfileUrl
+   - "portfolio", "website", or "personal link" → professional.portfolioUrl
+   - Expected date of joining or expected start date → application.expectedJoiningDate
+   - Keep date of birth, education dates, employment dates, and expected joining date distinct.
 
 Respond with ONLY valid JSON, no markdown, no explanation:
 {
@@ -45,7 +62,7 @@ export interface AIMapperOptions {
   timeoutMs?: number;
 }
 
-const GOOGLE_FORM_SYSTEM_PROMPT = `Classify each supplied unknown Google Forms field label against the supplied canonical profile intent keys and optional intent descriptions. Infer the best match from the label's meaning, including abbreviations and synonyms. Map a field labeled only "Name", with no first-name or last-name qualifier, to personal.fullName. Map a field labeled "Name" with a hint like "First and last name" to personal.fullName, not personal.firstName. Map explicit first-name and last-name fields to their corresponding keys. Map expected date of joining or expected start date to application.expectedJoiningDate; keep it distinct from date of birth, education dates, and employment dates. Return only a supplied intent key or null for each fieldId. Return null when a label has no matching profile variable or asks for a preference, job choice, consent, upload, password, OTP, legal declaration, or demographic answer. Never invent values or return placeholder text. Respond only with JSON: {"mappings":{"f0":null}}.`;
+const GOOGLE_FORM_SYSTEM_PROMPT = `Classify each supplied unknown Google Forms field label against the supplied canonical profile intent keys and optional intent descriptions. Infer the best match from the label's meaning, including abbreviations and synonyms. Map a field labeled only "Name", with no first-name or last-name qualifier, to personal.fullName. Map a field labeled "Name" with a hint like "First and last name" to personal.fullName, not personal.firstName. Map explicit first-name and last-name fields to their corresponding keys. Map education labels that name a level (UG/undergraduate/bachelor, PG/postgraduate/master, PhD/doctorate) to the matching education.ug.*, education.pg.*, or education.phd.* key, and "highest qualification" to education.highest.*. Map expected date of joining or expected start date to application.expectedJoiningDate; keep it distinct from date of birth, education dates, and employment dates. Return only a supplied intent key or null for each fieldId. Return null when a label has no matching profile variable or asks for a preference, job choice, consent, upload, password, OTP, legal declaration, or demographic answer. Never invent values or return placeholder text. Respond only with JSON: {"mappings":{"f0":null}}.`;
 /**
  * Call the OpenRouter API to map sanitized fields to intent keys.
  * Returns only validated mappings (rejects hallucinated keys).
@@ -68,6 +85,15 @@ export async function mapFieldsWithAI(
     ...(options.intentDescriptions ? { intentDescriptions: options.intentDescriptions } : {}),
   });
 
+  if (import.meta.env.DEV) {
+    console.info('[Pipeline 1/5] OpenRouter request', {
+      model,
+      promptMode: options.googleForm ? 'Google Forms label mapper' : 'sanitized field mapper',
+      systemPrompt: options.googleForm ? GOOGLE_FORM_SYSTEM_PROMPT : SYSTEM_PROMPT,
+      userPrompt: JSON.parse(userPrompt),
+    });
+  }
+
   const allowedIntentKeys = options.allowedIntentKeys ?? ALL_INTENT_KEYS;
 
   try {
@@ -75,15 +101,15 @@ export async function mapFieldsWithAI(
     const timeoutId = setTimeout(() => controller.abort(), options.timeoutMs ?? 15000);
 
     const response = await requestOpenRouter({
-        model: model,
-        messages: [
-          { role: 'system', content: options.googleForm ? GOOGLE_FORM_SYSTEM_PROMPT : SYSTEM_PROMPT },
-          { role: 'user', content: userPrompt }
-        ],
-        temperature: 0.1, // Low temperature for accuracy
-        max_tokens: 600,
-        response_format: { type: 'json_object' } // Force JSON output if supported
-      }, controller.signal);
+      model: model,
+      messages: [
+        { role: 'system', content: options.googleForm ? GOOGLE_FORM_SYSTEM_PROMPT : SYSTEM_PROMPT },
+        { role: 'user', content: userPrompt }
+      ],
+      temperature: 0.1, // Low temperature for accuracy
+      max_tokens: 600,
+      response_format: { type: 'json_object' } // Force JSON output if supported
+    }, controller.signal);
 
     if (!response.ok) {
       clearTimeout(timeoutId);
@@ -106,6 +132,9 @@ export async function mapFieldsWithAI(
     const cleanText = text.replace(/^\`\`\`json\n?/, '').replace(/\n?\`\`\`$/, '');
     const parsed = JSON.parse(cleanText);
     const rawMappings: Record<string, string | null> = parsed.mappings ?? {};
+    if (import.meta.env.DEV) {
+      console.info('[Pipeline 1/5] OpenRouter raw mapping response', rawMappings);
+    }
 
     // Validate: only keep mappings that reference real ProfileFieldKeys
     const validatedMappings: Record<string, ProfileFieldKey> = {};
@@ -120,6 +149,9 @@ export async function mapFieldsWithAI(
     console.log(
       `[AI Mapper] Mapped ${Object.keys(validatedMappings).length}/${fields.length} fields`,
     );
+    if (import.meta.env.DEV) {
+      console.info('[Pipeline 1/5] Validated AI mappings', validatedMappings);
+    }
 
     return { mappings: validatedMappings, completed: true };
   } catch (err) {

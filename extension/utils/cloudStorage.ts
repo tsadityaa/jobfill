@@ -15,8 +15,13 @@ import { deleteDocumentRegistryMetadata, mergeDocumentRegistryMetadata } from '.
 
 // ---- Profile Operations ----
 
-/** Load user profile from Supabase */
-export async function cloudGetProfile(): Promise<UserProfile> {
+export interface CloudProfileResult {
+  profile: UserProfile;
+  hasSavedProfile: boolean;
+}
+
+/** Load user profile from Supabase with status indicating whether a full profile was saved */
+export async function cloudGetProfileWithStatus(): Promise<CloudProfileResult> {
   const user = await getCurrentUser();
   if (!user) throw new Error('Not authenticated');
 
@@ -28,14 +33,17 @@ export async function cloudGetProfile(): Promise<UserProfile> {
 
   if (error || !data) {
     // Return empty profile if not found yet
-    return createEmptyProfile();
+    return { profile: createEmptyProfile(), hasSavedProfile: false };
   }
 
   // Parse the JSON profile data stored in the `summary` column
   // We store the full UserProfile as JSON in the summary field
   try {
     if (data.summary && data.summary.startsWith('{')) {
-      return JSON.parse(data.summary) as UserProfile;
+      return {
+        profile: JSON.parse(data.summary) as UserProfile,
+        hasSavedProfile: true,
+      };
     }
   } catch {
     // If parse fails, construct from individual fields
@@ -58,6 +66,12 @@ export async function cloudGetProfile(): Promise<UserProfile> {
   if (data.linkedin_url) {
     profile.professional.linkedin = data.linkedin_url;
   }
+  return { profile, hasSavedProfile: false };
+}
+
+/** Load user profile from Supabase */
+export async function cloudGetProfile(): Promise<UserProfile> {
+  const { profile } = await cloudGetProfileWithStatus();
   return profile;
 }
 

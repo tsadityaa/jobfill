@@ -15,6 +15,8 @@ export function formatProfileAnswerContext(profile: UserProfile): string {
       const details = [education.degree, education.field, education.institution].filter(Boolean).join(' in ');
       return details ? `Education: ${details}` : '';
     }),
+    ...(profile.secondaryEducation?.twelfth?.institution ? [`Class 12th / PUC: ${profile.secondaryEducation.twelfth.institution}${profile.secondaryEducation.twelfth.percentage ? ` (${profile.secondaryEducation.twelfth.percentage})` : ''}`] : []),
+    ...(profile.secondaryEducation?.tenth?.institution ? [`Class 10th / School: ${profile.secondaryEducation.tenth.institution}${profile.secondaryEducation.tenth.percentage ? ` (${profile.secondaryEducation.tenth.percentage})` : ''}`] : []),
     profile.professional.portfolio ? `Portfolio: ${profile.professional.portfolio}` : '',
     profile.professional.github ? `GitHub: ${profile.professional.github}` : '',
     profile.professional.linkedin ? `LinkedIn: ${profile.professional.linkedin}` : '',
@@ -54,6 +56,14 @@ function canonicalizeHttpUrl(value: string): string | undefined {
 async function selectRelevantMemoryLinks(question: string, memories: string[]): Promise<string> {
   const availableLinks = extractMemoryLinks(memories);
   if (availableLinks.length === 0) return '';
+
+  if (import.meta.env.DEV) {
+    console.info('[Pipeline 2/5] OpenRouter link-selection request', {
+      question,
+      memoryCount: memories.length,
+      availableLinkCount: availableLinks.length,
+    });
+  }
 
   const response = await requestOpenRouter({
     model: 'openai/gpt-4o-mini',
@@ -122,7 +132,7 @@ export function cleanAnswerText(raw: unknown): string {
     try {
       const parsed = JSON.parse(text);
       return cleanAnswerText(parsed);
-    } catch {}
+    } catch { }
   }
   const regexMatch = text.match(/^\s*\{?\s*"(?:response|answer|text|result|value)"\s*:\s*"([\s\S]*?)"?\s*\}?\s*$/);
   if (regexMatch) {
@@ -137,21 +147,32 @@ export async function generateApplicationAnswer(question: string, memories: stri
   }
   if (!memories.length && !profileContext.trim()) throw new Error('Add professional skills or experience to your profile before generating answers.');
 
-  const response = await requestOpenRouter({
+  if (import.meta.env.DEV) {
+    console.info('[Pipeline 2/5] OpenRouter answer request', {
       model: 'openai/gpt-4o-mini',
-      messages: [
-        {
-          role: 'system',
-          content: 'First classify the question. If it asks for a direct personal/profile fact (for example name, contact details, current location/address, current employer/company, date of birth, or graduation year), answer with only the exact requested value found in the supplied profile facts or relevant memories. Do not add first-person wording, explanations, or unrelated facts. Preserve saved addresses and other personal values exactly as stored. For graduation-year questions, return only the explicit four-digit year; for employer questions, return only the company name. Do not infer or invent missing facts; return an empty string if the requested value is unavailable. For open-ended questions (for example why the candidate should be hired), write a concise, specific first-person answer grounded in supplied skills and experience. Do not invent projects, experience, metrics, motivations, or claims; avoid generic filler. CRITICAL: Output ONLY plain text. Do NOT output JSON, code blocks, or key-value structures like {"response":"..."}. Respond directly with the text.',
-        },
-        {
-          role: 'user',
-          content: JSON.stringify({ question, profileFacts: profileContext, relevantMemories: memories }),
-        },
-      ],
-      temperature: 0.4,
-      max_tokens: 600,
-    }, AbortSignal.timeout(30000));
+      question,
+      profileFactCount: profileContext.split('\n').filter(Boolean).length,
+      profileContextCharacters: profileContext.length,
+      memoryCount: memories.length,
+      memoryContextCharacters: memories.reduce((total, memory) => total + memory.length, 0),
+    });
+  }
+
+  const response = await requestOpenRouter({
+    model: 'openai/gpt-4o-mini',
+    messages: [
+      {
+        role: 'system',
+        content: 'First classify the question. If it asks for a direct personal/profile fact (for example name, contact details, current location/address, current employer/company, date of birth, or graduation year), answer with only the exact requested value found in the supplied profile facts or relevant memories. Do not add first-person wording, explanations, or unrelated facts. Preserve saved addresses and other personal values exactly as stored. For graduation-year questions, return only the explicit four-digit year; for employer questions, return only the company name. Do not infer or invent missing facts; return an empty string if the requested value is unavailable. For open-ended questions (for example why the candidate should be hired), write a concise, specific first-person answer grounded in supplied skills and experience. Do not invent projects, experience, metrics, motivations, or claims; avoid generic filler. CRITICAL: Output ONLY plain text. Do NOT output JSON, code blocks, or key-value structures like {"response":"..."}. Respond directly with the text.',
+      },
+      {
+        role: 'user',
+        content: JSON.stringify({ question, profileFacts: profileContext, relevantMemories: memories }),
+      },
+    ],
+    temperature: 0.4,
+    max_tokens: 600,
+  }, AbortSignal.timeout(30000));
 
   if (!response.ok) throw new Error(`OpenRouter request failed (${response.status}).`);
   const data = await response.json();
@@ -174,21 +195,21 @@ export async function generateApplicationAnswers(
   }
 
   const response = await requestOpenRouter({
-      model: 'openai/gpt-4o-mini',
-      temperature: 0.3,
-      max_tokens: 600,
-      response_format: { type: 'json_object' },
-      messages: [
-        {
-          role: 'system',
-          content: 'Answer each job application question using only relevant supplied profile facts and memories. For direct personal/profile fact questions (for example name, contact details, current location/address, current employer/company, date of birth, or graduation year), return only the exact requested saved value with no first-person wording, explanation, or unrelated facts. Preserve addresses and personal values exactly as provided. For graduation-year questions return only an explicit four-digit year; for employer questions return only the company name. Never infer or invent missing personal facts; use an empty answer when the requested fact is unavailable. For open-ended questions (for example why the candidate should be hired), provide a concise, specific first-person answer grounded in supplied skills and experience. Never invent qualifications, experience, metrics, motivations, or company-specific claims. For interest or motivation questions, describe role fit without claiming unsupported personal motives. Return JSON only: {"answers":{"fieldId":"answer"}}.',
-        },
-        {
-          role: 'user',
-          content: JSON.stringify({ profileFacts: profileContext, questions: requests }),
-        },
-      ],
-    }, AbortSignal.timeout(30000));
+    model: 'openai/gpt-4o-mini',
+    temperature: 0.3,
+    max_tokens: 600,
+    response_format: { type: 'json_object' },
+    messages: [
+      {
+        role: 'system',
+        content: 'Answer each job application question using only relevant supplied profile facts and memories. For direct personal/profile fact questions (for example name, contact details, current location/address, current employer/company, date of birth, or graduation year), return only the exact requested saved value with no first-person wording, explanation, or unrelated facts. Preserve addresses and personal values exactly as provided. For graduation-year questions return only an explicit four-digit year; for employer questions return only the company name. Never infer or invent missing personal facts; use an empty answer when the requested fact is unavailable. For open-ended questions (for example why the candidate should be hired), provide a concise, specific first-person answer grounded in supplied skills and experience. Never invent qualifications, experience, metrics, motivations, or company-specific claims. For interest or motivation questions, describe role fit without claiming unsupported personal motives. Return JSON only: {"answers":{"fieldId":"answer"}}.',
+      },
+      {
+        role: 'user',
+        content: JSON.stringify({ profileFacts: profileContext, questions: requests }),
+      },
+    ],
+  }, AbortSignal.timeout(30000));
 
   if (!response.ok) throw new Error(`OpenRouter request failed (${response.status}).`);
   const data = await response.json();
@@ -209,21 +230,21 @@ export async function extractProfileFieldFromDocuments(
   if (documentEvidence.length === 0) return undefined;
 
   const response = await requestOpenRouter({
-      model: 'openai/gpt-4o-mini',
-      temperature: 0,
-      max_tokens: 600,
-      response_format: { type: 'json_object' },
-      messages: [
-        {
-          role: 'system',
-          content: 'Extract the requested personal field only when its exact value is explicitly present in the supplied document excerpts. Never infer, complete, or fabricate missing personal data. Return JSON {"value":"exact value"} or {"value":null} when the excerpts do not contain it.',
-        },
-        {
-          role: 'user',
-          content: JSON.stringify({ fieldLabel, profileField, documentExcerpts: documentEvidence.map((excerpt) => excerpt.slice(0, 1800)) }),
-        },
-      ],
-    }, AbortSignal.timeout(15000));
+    model: 'openai/gpt-4o-mini',
+    temperature: 0,
+    max_tokens: 600,
+    response_format: { type: 'json_object' },
+    messages: [
+      {
+        role: 'system',
+        content: 'Extract the requested personal field only when its exact value is explicitly present in the supplied document excerpts. Never infer, complete, or fabricate missing personal data. Return JSON {"value":"exact value"} or {"value":null} when the excerpts do not contain it.',
+      },
+      {
+        role: 'user',
+        content: JSON.stringify({ fieldLabel, profileField, documentExcerpts: documentEvidence.map((excerpt) => excerpt.slice(0, 1800)) }),
+      },
+    ],
+  }, AbortSignal.timeout(15000));
 
   if (!response.ok) throw new Error(`Document field extraction failed (${response.status}).`);
   const data = await response.json();

@@ -76,6 +76,16 @@ const FIELD_DICTIONARY: FieldPattern[] = [
     inputTypes: ['date'],
   },
   {
+    profileField: 'personal.gender',
+    patterns: [
+      /^gender$/i,
+      /^sex$/i,
+      /your[_-]?gender/i,
+      /gender[_-]?identity/i,
+    ],
+    autocompleteValues: ['sex'],
+  },
+  {
     profileField: 'application.expectedJoiningDate',
     patterns: [
       /^expected[_-]?(?:date[_-]of[_-]?)?(?:joining|start)(?:[_-]?date)?$/i,
@@ -176,7 +186,19 @@ const FIELD_DICTIONARY: FieldPattern[] = [
     profileField: 'education.latest.institution',
     patterns: [
       /^(school|university|college|institution)[_-]?(name)?$/i,
+      /^school[_-]?or[_-]?university$/i,
+      /^education(?:[_-]\d+)?[_-]+school$/i,
       /^alma[_-]?mater$/i,
+    ],
+    autocompleteValues: [],
+  },
+  {
+    profileField: 'education.current.registrationNumber',
+    patterns: [
+      /^(academic[_-]?)?registration[_-]?(no|num|number)?$/i,
+      /^(student[_-]?)?(roll|enrollment)[_-]?(no|num|number)?$/i,
+      /^student[_-]?id$/i,
+      /^usn$/i,
     ],
     autocompleteValues: [],
   },
@@ -193,6 +215,7 @@ const FIELD_DICTIONARY: FieldPattern[] = [
     profileField: 'education.latest.field',
     patterns: [
       /^(field|area)[_-]?(of)?[_-]?(study|specialization)$/i,
+      /^education(?:[_-]\d+)?[_-]+fieldofstudy$/i,
       /^major$/i,
       /^concentration$/i,
       /^discipline$/i,
@@ -286,6 +309,8 @@ const FIELD_DICTIONARY: FieldPattern[] = [
     profileField: 'professional.skills',
     patterns: [
       /^skills$/i,
+      /^(?:type[_-]?to[_-]?add[_-]?)?skills$/i,
+      /^skills[_-]+skills$/i,
       /^key[_-]?skills$/i,
       /^technical[_-]?skills$/i,
       /^competencies$/i,
@@ -464,8 +489,11 @@ export function getLabelText(el: HTMLElement): string | undefined {
     if (text) return text;
   }
 
-  const googleFormCard = el.closest<HTMLElement>('[role="listitem"]');
-  const googleFormHeading = googleFormCard?.querySelector<HTMLElement>('[role="heading"], h1, h2, h3, h4');
+  const googleFormCard = el.closest<HTMLElement>('.Qr7Oae, [jsmodel="CP1oW"]')
+    ?? (el.closest<HTMLElement>('[role="listitem"]')?.querySelector('[role="heading"]')
+      ? el.closest<HTMLElement>('[role="listitem"]')
+      : el.parentElement?.closest<HTMLElement>('[role="listitem"]'));
+  const googleFormHeading = googleFormCard?.querySelector<HTMLElement>('[role="heading"], .M7eMe, h1, h2, h3, h4');
   const googleFormQuestion = googleFormHeading?.textContent?.replace(/\s+/g, ' ').trim();
   if (googleFormQuestion && googleFormQuestion.length < 240) return googleFormQuestion;
 
@@ -595,6 +623,9 @@ export function scanPageFields(): DetectedField[] {
     const fileInputLabel = isFileInput ? getVisibleFileInputLabel(el) : undefined;
     if (!isRenderedField(el) && !fileInputLabel) continue;
 
+    // Skip inputs that belong to React-Select or custom combobox dropdowns (handled by Dropdown Pipeline)
+    if (el instanceof HTMLInputElement && isDropdownComboboxInput(el)) continue;
+
     const attributes: DetectedField['attributes'] = {
       name: el.getAttribute('name') || undefined,
       id: el.id || undefined,
@@ -682,10 +713,15 @@ const FILLABLE_FIELDS_SELECTOR =
 export function hasVisibleFormFields(): boolean {
   if (window.self !== window.top && (window.innerWidth < 200 || window.innerHeight < 100)) return false;
   const elements = queryAcrossOpenShadowRoots<HTMLElement>(FILLABLE_FIELDS_SELECTOR);
-  return elements.some((element) =>
+  if (elements.some((element) =>
     isRenderedField(element)
     || (element instanceof HTMLInputElement && element.type === 'file' && Boolean(getVisibleFileInputLabel(element))),
+  )) return true;
+
+  const workdayDropdowns = queryAcrossOpenShadowRoots<HTMLElement>(
+    '[data-automation-id^="formField-"] [aria-haspopup="listbox"]',
   );
+  return workdayDropdowns.some(isRenderedField);
 }
 
 function getVisibleFileInputLabel(input: HTMLInputElement): string | undefined {
@@ -711,6 +747,39 @@ function getVisibleFileInputLabel(input: HTMLInputElement): string | undefined {
 // ---- AI Layer: Sanitized Field Extraction ----
 
 import type { SanitizedField, FieldIdLookup } from '../types/aiMapper';
+
+export function isDropdownComboboxInput(el: HTMLElement): boolean {
+  if (el.tagName.toLowerCase() !== 'input') return false;
+
+  // React-Select search input or hidden required input
+  if (el.classList.contains('select__input') || el.classList.contains('remix-css-1a0ro4n-requiredInput')) {
+    return true;
+  }
+
+  // React-Select container ancestors
+  if (el.closest('.select-shell, .select__control, .select__value-container, .select__input-container')) {
+    return true;
+  }
+
+  // React-Select generated IDs or ARIA attributes
+  const id = el.id || '';
+  const describedBy = el.getAttribute('aria-describedby') || '';
+  if (id.startsWith('react-select-') || describedBy.includes('react-select')) {
+    return true;
+  }
+
+  // ARIA Combobox with list popup (e.g. role="combobox" and aria-haspopup="listbox" or "true")
+  const role = el.getAttribute('role');
+  const hasPopup = el.getAttribute('aria-haspopup');
+  const autoComp = el.getAttribute('aria-autocomplete');
+  if (role === 'combobox' && (hasPopup === 'true' || hasPopup === 'listbox' || autoComp === 'list')) {
+    if (el.closest('[class*="select"], .field-wrapper, .select__container')) {
+      return true;
+    }
+  }
+
+  return false;
+}
 
 function isRenderedField(el: HTMLElement): boolean {
   const style = getComputedStyle(el);
@@ -747,6 +816,7 @@ export function extractSanitizedFields(): {
 
   for (const el of elements) {
     if (!isRenderedField(el)) continue;
+    if (el instanceof HTMLInputElement && isDropdownComboboxInput(el)) continue;
 
     const fieldId = `f${index}`;
     const selector = getUniqueSelector(el);

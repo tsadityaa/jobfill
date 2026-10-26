@@ -6,8 +6,10 @@
 // ============================================================
 
 import type { FieldMapping, AutofillResult, AutofillFieldResult } from '../types/autofill';
-import { getElementBySelector, scanPageFields } from './fieldDetector';
+import { getElementBySelector, queryAcrossOpenShadowRoots, scanPageFields } from './fieldDetector';
 import { cleanAnswerText } from './answerGenerator';
+import collegeAliases from '../data/college-aliases.json';
+import { withScrollLock, withScrollLockSync } from './scrollLock';
 
 /**
  * Find the React fiber key on a DOM node (differs across React versions).
@@ -187,12 +189,398 @@ function dispatchInputEvents(el: HTMLInputElement | HTMLTextAreaElement | HTMLSe
   }
 }
 
+function pressWorkdayEnter(el: HTMLInputElement): void {
+  el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, composed: true }));
+  el.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, composed: true }));
+}
+
+function getWorkdaySearchQueries(mapping: FieldMapping): string[] | null {
+  const profileField = mapping.profileField;
+  if (isWorkdaySchoolField(profileField)) {
+    return [mapping.value.trim()];
+  }
+  if (/^education\.(?:current|ug|pg|phd|highest)\.fieldOfStudy$/.test(profileField) || profileField === 'education.latest.field') {
+    return [/^(?:cse|computer science and engineering)$/i.test(mapping.value.trim())
+      ? 'Computer Science'
+      : mapping.value.trim()];
+  }
+  if (profileField === 'professional.skills') {
+    const skills = [...new Set(mapping.value.split(',').map((skill) => skill.trim()).filter(Boolean))];
+    return skills.length ? skills : null;
+  }
+  return null;
+}
+
+function clickWorkdayOption(element: HTMLElement): void {
+  const clickTarget = element.querySelector<HTMLElement>('[data-automation-id="promptLeafNode"]') ?? element;
+  const rect = clickTarget.getBoundingClientRect();
+  const shared: MouseEventInit = {
+    bubbles: true,
+    cancelable: true,
+    composed: true,
+    view: window,
+    clientX: rect.left + rect.width / 2,
+    clientY: rect.top + rect.height / 2,
+    button: 0,
+    buttons: 1,
+  };
+
+  clickTarget.dispatchEvent(new PointerEvent('pointerdown', { ...shared, pointerId: 1, pointerType: 'mouse' }));
+  clickTarget.dispatchEvent(new MouseEvent('mousedown', shared));
+  clickTarget.dispatchEvent(new PointerEvent('pointerup', { ...shared, pointerId: 1, pointerType: 'mouse', buttons: 0 }));
+  clickTarget.dispatchEvent(new MouseEvent('mouseup', { ...shared, buttons: 0 }));
+  clickTarget.dispatchEvent(new MouseEvent('click', { ...shared, buttons: 0 }));
+}
+
+function normalizeWorkdayLabel(value: string): string {
+  return value.replace(/\s+/g, ' ').trim().toLocaleLowerCase();
+}
+
+interface CollegeAliasEntry {
+  canonical_name: string;
+  aliases: string[];
+}
+
+const COLLEGE_ALIAS_ENTRIES = collegeAliases as CollegeAliasEntry[];
+
+function normalizeCollegeName(value: string): string {
+  return value.normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLocaleLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function isWorkdaySchoolField(profileField: string): boolean {
+  return /^education\.(?:current|ug|pg|phd|highest)\.institutionName$/.test(profileField) || profileField === 'education.latest.institution';
+}
+
+function findCollegeAliasEntry(value: string): CollegeAliasEntry | undefined {
+  const normalized = normalizeCollegeName(value);
+  return COLLEGE_ALIAS_ENTRIES.find((entry) =>
+    [entry.canonical_name, ...entry.aliases].some((name) => normalizeCollegeName(name) === normalized),
+  );
+}
+
+function getCollegeSearchNames(value: string): string[] {
+  const entry = findCollegeAliasEntry(value);
+  return entry
+    ? [...new Set([entry.canonical_name, ...entry.aliases, value.trim()])]
+    : [value.trim()];
+}
+
+const WORKDAY_SKILL_ALIASES: Record<string, string[]> = {
+  html: ['Hyper Text Markup Language (HTML)'],
+  'hyper text markup language': ['HTML', 'Hyper Text Markup Language (HTML)'],
+  css: ['Cascading Style Sheets', 'CSS'],
+  'cascading style sheets': ['CSS', 'Cascading Style Sheets'],
+  css3: ['CSS3', 'CSS'],
+  js: ['JavaScript'],
+  javascript: ['JavaScript'],
+  'java script': ['JavaScript'],
+  ts: ['TypeScript'],
+  typescript: ['TypeScript'],
+  'type script': ['TypeScript'],
+  'c++': ['C++ Programming Language'],
+  cpp: ['C++ Programming Language'],
+  'c plus plus': ['C++ Programming Language'],
+  'c#': ['C Sharp (Programming Language)'],
+  csharp: ['C Sharp (Programming Language)'],
+  'c sharp': ['C Sharp (Programming Language)'],
+  golang: ['Go Programming Language', 'Go'],
+  'go lang': ['Go Programming Language', 'Go'],
+  'go language': ['Go Programming Language', 'Go'],
+  py: ['Python', 'Python (Programming Language)'],
+  python: ['Python', 'Python (Programming Language)'],
+  php: ['PHP (Programming Language)', 'PHP'],
+  ruby: ['Ruby', 'Ruby (Programming Language)'],
+  rust: ['Rust Programming Language', 'Rust'],
+  swift: ['Swift Programming Language', 'Swift'],
+  kotlin: ['Kotlin Programming Language', 'Kotlin'],
+  java: ['Java', 'Java Programming Language'],
+  dart: ['Dart Programming Language', 'Dart'],
+  perl: ['Perl Programming Language', 'Perl'],
+  r: ['R Programming Language', 'R'],
+  scala: ['Scala Programming Language', 'Scala'],
+  sql: ['SQL', 'Structured Query Language'],
+  'structured query language': ['SQL', 'Structured Query Language'],
+  django: ['Django', 'Django Web Framework'],
+  'django framework': ['Django', 'Django Web Framework'],
+  node: ['Node.js'],
+  'react js': ['React.js', 'React'],
+  react: ['React.js', 'React'],
+  reactjs: ['React.js', 'React'],
+  vue: ['Vue.js', 'Vue'],
+  vuejs: ['Vue.js', 'Vue'],
+  angular: ['Angular', 'Angular Framework'],
+  'node js': ['Node.js'],
+  nodejs: ['Node.js'],
+  'node.js': ['Node.js'],
+  express: ['Express.js', 'Express'],
+  'express js': ['Express.js', 'Express'],
+  nextjs: ['Next.js', 'Next'],
+  'next js': ['Next.js', 'Next'],
+  'k8s': ['Kubernetes'],
+  kube: ['Kubernetes'],
+  kubernetes: ['Kubernetes'],
+  docker: ['Docker'],
+  aws: ['Amazon Web Services (AWS)', 'Amazon Web Services'],
+  'amazon web services': ['Amazon Web Services (AWS)', 'Amazon Web Services'],
+  gcp: ['Google Cloud Platform (GCP)', 'Google Cloud Platform'],
+  'google cloud': ['Google Cloud Platform (GCP)', 'Google Cloud Platform'],
+  azure: ['Microsoft Azure', 'Azure'],
+  mongodb: ['MongoDB', 'MongoDB (Platform)'],
+  mongo: ['MongoDB', 'MongoDB (Platform)'],
+  postgres: ['PostgreSQL', 'Postgres'],
+  postgresql: ['PostgreSQL', 'Postgres'],
+  mysql: ['MySQL'],
+  redis: ['Redis'],
+  tensorflow: ['TensorFlow', 'TensorFlow.js'],
+  tf: ['TensorFlow'],
+  pytorch: ['PyTorch'],
+  'scikit learn': ['scikit-learn', 'Scikit-Learn'],
+  sklearn: ['scikit-learn', 'Scikit-Learn'],
+  'machine learning': ['Machine Learning'],
+  ml: ['Machine Learning'],
+  'artificial intelligence': ['Artificial Intelligence'],
+  ai: ['Artificial Intelligence'],
+  pandas: ['Pandas'],
+  numpy: ['NumPy', 'Numpy'],
+  spark: ['Apache Spark', 'Spark'],
+  pyspark: ['Apache Spark', 'PySpark'],
+  kafka: ['Apache Kafka', 'Kafka'],
+  airflow: ['Apache Airflow', 'Airflow'],
+  'data science': ['Data Science'],
+  'data engineering': ['Data Engineering'],
+  'web development': ['Web Development'],
+  'web dev': ['Web Development'],
+  'app development': ['Application Development'],
+  'application development': ['Application Development'],
+};
+
+function getWorkdaySearchTerms(query: string, isSchool: boolean): string[] {
+  if (isSchool) return getCollegeSearchNames(query);
+  const aliases = WORKDAY_SKILL_ALIASES[normalizeWorkdayLabel(query)] ?? [];
+  return [...new Set([query, ...aliases])];
+}
+
+function isExactWorkdayOptionMatch(value: string, expected: string, isSchool: boolean): boolean {
+  if (isSchool) {
+    const normalized = normalizeCollegeName(value);
+    return getCollegeSearchNames(expected).some((name) => {
+      const candidate = normalizeCollegeName(name);
+      return normalized === candidate || normalized.startsWith(`${candidate} `);
+    });
+  }
+
+  const normalized = normalizeWorkdayLabel(value);
+  const normalizedExpected = normalizeWorkdayLabel(expected);
+  const candidates = [normalizedExpected, ...(WORKDAY_SKILL_ALIASES[normalizedExpected] ?? []).map(normalizeWorkdayLabel)];
+
+  return candidates.some((candidate) => {
+    if (!candidate) return false;
+    return normalized === candidate
+      || (normalized.startsWith(`${candidate} (`) && normalized.endsWith(')'))
+      || normalized.startsWith(`${candidate} -`);
+  });
+}
+
+function matchesWorkdayLabel(value: string, expected: string, isSchool: boolean): boolean {
+  const cleaned = value
+    .replace(/[×✕✖\u00d7\u2715\u2716]/g, ' ')
+    .replace(/\b(remove|delete|close|selected)\b/gi, ' ');
+  if (isSchool) return isExactWorkdayOptionMatch(cleaned, expected, true);
+
+  const normalized = normalizeWorkdayLabel(cleaned);
+  const normalizedExpected = normalizeWorkdayLabel(expected);
+  const candidates = [normalizedExpected, ...(WORKDAY_SKILL_ALIASES[normalizedExpected] ?? []).map(normalizeWorkdayLabel)];
+
+  return candidates.some((candidate) => {
+    if (!candidate) return false;
+    return normalized === candidate
+      || (normalized.startsWith(`${candidate} (`) && normalized.endsWith(')'))
+      || normalized.startsWith(`${candidate} -`);
+  });
+}
+
+async function findWorkdayOption(input: HTMLInputElement, expected: string, isSchool: boolean): Promise<HTMLElement | undefined> {
+  const multiselectId = input.getAttribute('data-uxi-multiselect-id');
+  const listboxes = queryAcrossOpenShadowRoots<HTMLElement>(
+    '[data-automation-id="activeListContainer"][role="listbox"], [role="listbox"][aria-label="Options Expanded"]',
+  ).filter((listbox) => getComputedStyle(listbox).display !== 'none' && listbox.getClientRects().length > 0);
+
+  for (const listbox of listboxes) {
+    const options = Array.from(listbox.querySelectorAll<HTMLElement>('[role="option"]'))
+      .filter((option) => !multiselectId || option.querySelector<HTMLElement>('[data-uxi-multiselect-id]')
+        ?.getAttribute('data-uxi-multiselect-id') === multiselectId);
+
+    // 1. Exact match has highest priority (e.g. "Vellore Institute of Technology" over "University of Madras (Vellore Institute of Technology)")
+    const exactMatch = options.find((option) =>
+      isExactWorkdayOptionMatch(option.innerText || option.textContent || '', expected, isSchool),
+    );
+    if (exactMatch) return exactMatch;
+
+    // 2. Prefix match (option label starts with the target name)
+    const prefixMatch = options.find((option) => {
+      const text = normalizeWorkdayLabel(option.innerText || option.textContent || '');
+      return getWorkdaySearchTerms(expected, isSchool)
+        .some((term) => text.startsWith(normalizeWorkdayLabel(term)));
+    });
+    if (prefixMatch) return prefixMatch;
+  }
+
+  return undefined;
+}
+
+async function fillWorkdayMultiSelect(selector: string, query: string, isSchool: boolean): Promise<boolean> {
+  return withScrollLock(async () => {
+    const getInput = (): HTMLInputElement | null => {
+      const element = getElementBySelector(selector);
+      return element instanceof HTMLInputElement ? element : null;
+    };
+    const getContainer = (): HTMLElement | null =>
+      getInput()?.closest<HTMLElement>('[data-automation-id="multiSelectContainer"]') ?? null;
+    const initialInput = getInput();
+    const initialContainer = getContainer();
+    if (!initialInput || !initialContainer) return false;
+
+    const expected = normalizeWorkdayLabel(query);
+    const selectedItems = Array.from(initialContainer.querySelectorAll<HTMLElement>('[data-automation-id="selectedItem"], [data-automation-id*="selectedItem"]'));
+    if (selectedItems.some((item) => matchesWorkdayLabel(item.innerText || item.textContent || item.getAttribute('aria-label') || '', expected, isSchool))) {
+      return true;
+    }
+
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+    const getSearchInput = () => getContainer()?.querySelector<HTMLInputElement>('[data-automation-id="searchBox"]') ?? getInput() ?? initialInput;
+    const setQuery = (input: HTMLInputElement, value: string) => {
+      if (setter) setter.call(input, value);
+      else input.value = value;
+      dispatchInputEvents(input, true);
+    };
+
+    initialInput.focus({ preventScroll: true });
+    try {
+      let exactOption: HTMLElement | undefined;
+      for (const searchTerm of getWorkdaySearchTerms(query, isSchool)) {
+        const input = getSearchInput();
+        input.focus({ preventScroll: true });
+        setQuery(input, searchTerm.slice(0, 1));
+        pressWorkdayEnter(input);
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        setQuery(input, searchTerm);
+        pressWorkdayEnter(input);
+
+        const deadline = Date.now() + 3000;
+        while (Date.now() < deadline) {
+          const currentInput = getSearchInput();
+          if (normalizeWorkdayLabel(currentInput.value) !== normalizeWorkdayLabel(searchTerm)) {
+            await new Promise((resolve) => setTimeout(resolve, 150));
+            continue;
+          }
+          exactOption = await findWorkdayOption(currentInput, expected, isSchool);
+          if (exactOption) break;
+          await new Promise((resolve) => setTimeout(resolve, 150));
+        }
+        if (exactOption) break;
+      }
+      if (!exactOption) return false;
+
+      // Click the matched option and finish immediately
+      clickWorkdayOption(exactOption);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      return true;
+    } finally {
+      const input = getSearchInput();
+      if (input.value) setQuery(input, '');
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true, composed: true }));
+    }
+  });
+}
+
+async function closeWorkdayMultiSelect(selector: string): Promise<void> {
+  const element = getElementBySelector(selector);
+  const input = element instanceof HTMLInputElement ? element : null;
+  const container = input?.closest<HTMLElement>('[data-automation-id="multiSelectContainer"]') ?? null;
+  const searchInput = container?.querySelector<HTMLInputElement>('[data-automation-id="searchBox"]') ?? input;
+
+  if (searchInput) {
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+    if (setter) setter.call(searchInput, '');
+    else searchInput.value = '';
+    dispatchInputEvents(searchInput, true);
+
+    searchInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true, composed: true }));
+    searchInput.dispatchEvent(new KeyboardEvent('keyup', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true, composed: true }));
+
+    searchInput.blur();
+    searchInput.dispatchEvent(new FocusEvent('blur', { bubbles: true }));
+    searchInput.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+  }
+
+  if (input && input !== searchInput) {
+    input.blur();
+    input.dispatchEvent(new FocusEvent('blur', { bubbles: true }));
+    input.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+  }
+
+  // Dismiss dropdown by dispatching Escape and global outside click
+  document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+  document.body.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
+  document.body.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+
+  await new Promise((resolve) => setTimeout(resolve, 80));
+}
+
+function normalizeFillText(value: string): string {
+  return value.replace(/\s+/g, ' ').trim().toLocaleLowerCase();
+}
+
+function isMappingSatisfied(mapping: FieldMapping): boolean {
+  const element = getElementBySelector(mapping.selector);
+  if (!(element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement)) {
+    return false;
+  }
+
+  const workdayQueries = element instanceof HTMLInputElement
+    && element.getAttribute('data-uxi-widget-type') === 'selectinput'
+    ? getWorkdaySearchQueries(mapping)
+    : null;
+  if (workdayQueries) {
+    const isSchool = isWorkdaySchoolField(mapping.profileField);
+    const container = element.closest<HTMLElement>('[data-automation-id="multiSelectContainer"]');
+    const selectedItems = Array.from(container?.querySelectorAll<HTMLElement>('[data-automation-id="selectedItem"]') ?? []);
+    return workdayQueries.every((query) => selectedItems.some((item) =>
+      matchesWorkdayLabel(item.innerText || item.getAttribute('aria-label') || '', query, isSchool),
+    ));
+  }
+
+  if (element instanceof HTMLSelectElement) {
+    const selectedText = element.options[element.selectedIndex]?.textContent ?? '';
+    const target = normalizeFillText(mapping.value);
+    return normalizeFillText(element.value) === target || normalizeFillText(selectedText) === target;
+  }
+
+  const datePart = element instanceof HTMLInputElement
+    ? getWorkdayDatePartValue(element, mapping.value)
+    : undefined;
+  if (datePart === null) return false;
+  const targetValue = element instanceof HTMLInputElement
+    ? datePart ?? formatDateForInput(element, mapping.value)
+    : mapping.value;
+  return normalizeFillText(element.value) === normalizeFillText(cleanAnswerText(targetValue));
+}
+
+let fillQueue: Promise<void> = Promise.resolve();
+
 export function fillQuestionAnswer(el: HTMLInputElement | HTMLTextAreaElement, value: string): boolean {
-  const cleaned = cleanAnswerText(value);
-  if (!cleaned.trim()) return false;
-  setNativeValue(el, cleaned);
-  dispatchInputEvents(el);
-  return el.value === cleaned;
+  return withScrollLockSync(() => {
+    const cleaned = cleanAnswerText(value);
+    if (!cleaned.trim()) return false;
+    setNativeValue(el, cleaned);
+    dispatchInputEvents(el);
+    return el.value === cleaned;
+  });
 }
 
 /**
@@ -409,19 +797,18 @@ function pageCompleteFlash() {
 /**
  * Fill all mapped fields on the page with cascading visual FX.
  */
-export function fillFields(mappings: FieldMapping[]): AutofillResult {
+async function fillFieldsPass(mappings: FieldMapping[]): Promise<AutofillResult> {
   ensureStyles();
 
   const results: AutofillFieldResult[] = [];
   let errorCount = 0;
+  let skippedExistingCount = 0;
 
   // ---- Pre-scan: resolve selectors to elements ----
-  // No skipped_existing guard — if a mapping says fill it, we fill it.
-  // Skipping already-filled fields caused re-scans to miss fields that Adobe
-  // had cleared from React state between scans.
   type FillItem = {
     el: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
     mapping: FieldMapping;
+    workdayAutocomplete: boolean;
   };
   const toFill: FillItem[] = [];
 
@@ -434,8 +821,18 @@ export function fillFields(mappings: FieldMapping[]): AutofillResult {
         continue;
       }
 
+      if (isMappingSatisfied(mapping)) {
+        results.push({ selector: mapping.selector, profileField: mapping.profileField, status: 'skipped_existing' });
+        skippedExistingCount++;
+        continue;
+      }
+
       if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) {
-        toFill.push({ el, mapping });
+        const workdayQueries = el instanceof HTMLInputElement
+          && el.getAttribute('data-uxi-widget-type') === 'selectinput'
+          ? getWorkdaySearchQueries(mapping)
+          : null;
+        toFill.push({ el, mapping, workdayAutocomplete: workdayQueries !== null });
       }
     } catch (err) {
       results.push({ selector: mapping.selector, profileField: mapping.profileField, status: 'error', message: err instanceof Error ? err.message : 'Unknown error' });
@@ -453,7 +850,23 @@ export function fillFields(mappings: FieldMapping[]): AutofillResult {
     try {
       let ok = false;
 
-      if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+      if (item.workdayAutocomplete && el instanceof HTMLInputElement) {
+        const queries = getWorkdaySearchQueries(mapping) ?? [];
+        let failedQuery: string | undefined;
+        ok = queries.length > 0;
+        for (const query of queries) {
+          if (await fillWorkdayMultiSelect(mapping.selector, query, isWorkdaySchoolField(mapping.profileField))) continue;
+          failedQuery = query;
+          ok = false;
+          break;
+        }
+        await closeWorkdayMultiSelect(mapping.selector);
+        if (!ok) {
+          results.push({ selector: mapping.selector, profileField: mapping.profileField, status: 'error', message: `No exact Workday suggestion found for "${failedQuery ?? mapping.value}"` });
+          errorCount++;
+          continue;
+        }
+      } else if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
         const workdayDateValue = el instanceof HTMLInputElement
           ? getWorkdayDatePartValue(el, mapping.value)
           : undefined;
@@ -487,6 +900,7 @@ export function fillFields(mappings: FieldMapping[]): AutofillResult {
   }
 
   const filledCount = filled.length;
+  const ANIM_STAGGER = 60;
 
   // ---- Phase 1.5: Re-scan after select/dropdown changes ----
   // When selects (Country, State, Phone Type, etc.) are filled, the form may
@@ -509,7 +923,8 @@ export function fillFields(mappings: FieldMapping[]): AutofillResult {
 
     const originalSelectors = new Set(mappings.map((m) => m.selector));
 
-    setTimeout(() => {
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    {
       const newFilled: FillItem[] = [];
 
       // --- Pass A: Retry ORIGINAL selects that failed in Phase 1 ---
@@ -529,7 +944,7 @@ export function fillFields(mappings: FieldMapping[]): AutofillResult {
         try {
           const ok = fillSelect(el, mapping.value);
           if (ok) {
-            newFilled.push({ el, mapping });
+            newFilled.push({ el, mapping, workdayAutocomplete: false });
             console.log(`[Personal Copilot] Re-scan: retried select "${mapping.selector}" → "${mapping.value}" ✓`);
           }
         } catch (err) {
@@ -576,9 +991,9 @@ export function fillFields(mappings: FieldMapping[]): AutofillResult {
           }
 
           if (ok) {
-            newFilled.push({ el, mapping: newMapping });
+            newFilled.push({ el, mapping: newMapping, workdayAutocomplete: false });
             // Also add to the main filled array for Phase 4 reinforcement
-            filled.push({ el, mapping: newMapping });
+            filled.push({ el, mapping: newMapping, workdayAutocomplete: false });
           }
         } catch (err) {
           console.warn('[Personal Copilot] Re-scan fill failed:', field.selector, err);
@@ -599,7 +1014,7 @@ export function fillFields(mappings: FieldMapping[]): AutofillResult {
           }, idx * ANIM_STAGGER);
         });
       }
-    }, 800);
+    }
   }
 
   // ---- Phase 2 (async, visual only): Stagger animations at 60ms ----
@@ -608,17 +1023,10 @@ export function fillFields(mappings: FieldMapping[]): AutofillResult {
   // re-render the form ~200ms later — adding/removing fields and shifting
   // positions. We delay Phase 2 by 400ms in that case so getBoundingClientRect()
   // measures FINAL positions, not pre-re-render ones.
-  const ANIM_STAGGER = 60;
   const PHASE2_DELAY = filledSelects.length > 0 ? 400 : 0;
 
-  filled.forEach(({ el, mapping }, idx) => {
+  filled.forEach(({ el }, idx) => {
     setTimeout(() => {
-      // Re-verify value — React may have reconciled and cleared it
-      if ((el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) && el.value !== mapping.value) {
-        setNativeValue(el, mapping.value);
-        dispatchInputEvents(el, true /* skipBlur */);
-      }
-      // Wait for layout to settle before measuring positions
       requestAnimationFrame(() => {
         glowField(el);
         checkBadge(el as HTMLElement);
@@ -639,36 +1047,45 @@ export function fillFields(mappings: FieldMapping[]): AutofillResult {
     if (filledCount > 0) pageCompleteFlash();
   }, lastAnimEnd);
 
-  // ---- Phase 4: Final reinforcement sweep ----
-  // One last pass after all animations + page flash have fired.
-  // Catches any React re-render triggered by animation-phase events.
-  // Uses increasing delays (500ms, 1200ms, 2500ms) to survive multi-pass
-  // React reconciliation cycles. Also covers fields added by Phase 1.5.
-  const REINFORCE_DELAYS = [500, 1200, 2500];
-  for (const delay of REINFORCE_DELAYS) {
-    setTimeout(() => {
-      for (const { el, mapping } of filled) {
-        if (
-          (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) &&
-          el.value !== mapping.value
-        ) {
-          setNativeValue(el, mapping.value);
-          triggerReactOnChange(el);
-          el.dispatchEvent(new Event('input', { bubbles: true }));
-          el.dispatchEvent(new Event('change', { bubbles: true }));
-        }
-      }
-    }, lastAnimEnd + delay);
-  }
-
-  // Return optimistic counts immediately (async fills happen after)
+  // Return only after DOM fills and the select-dependent rescan have completed.
   return {
     totalFields: mappings.length,
-    filledFields: toFill.length,
+    filledFields: filledCount,
     skippedSensitive: 0,
     skippedUnknown: 0,
-    skippedExisting: 0,
+    skippedExisting: skippedExistingCount,
     errors: errorCount,
     fields: results,
   };
 }
+
+async function fillAndRetryMissing(mappings: FieldMapping[]): Promise<AutofillResult> {
+  const firstPass = await fillFieldsPass(mappings);
+  if (mappings.length === 0) return firstPass;
+
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  const missingMappings = mappings.filter((mapping) => !isMappingSatisfied(mapping));
+  if (missingMappings.length === 0) return firstPass;
+
+  console.info(`[JobFill] Resweep: retrying ${missingMappings.length} of ${mappings.length} fields still missing after fill`);
+  const retryPass = await fillFieldsPass(missingMappings);
+  const fieldsBySelector = new Map(firstPass.fields.map((field) => [field.selector, field]));
+  for (const field of retryPass.fields) fieldsBySelector.set(field.selector, field);
+  const fields = Array.from(fieldsBySelector.values());
+
+  return {
+    ...firstPass,
+    totalFields: mappings.length,
+    filledFields: fields.filter((field) => field.status === 'filled').length,
+    skippedExisting: fields.filter((field) => field.status === 'skipped_existing').length,
+    errors: fields.filter((field) => field.status === 'error').length,
+    fields,
+  };
+}
+
+export function fillFields(mappings: FieldMapping[]): Promise<AutofillResult> {
+  const operation = fillQueue.then(() => withScrollLock(() => fillAndRetryMissing(mappings)));
+  fillQueue = operation.then(() => undefined, () => undefined);
+  return operation;
+}
+

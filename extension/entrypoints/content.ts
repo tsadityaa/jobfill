@@ -22,9 +22,45 @@ import type { ContentScriptRequest, ScanFieldsResponse, FillFieldsResponse, AISc
 import type { ScanResult } from '../types/autofill';
 import { applyChoiceDecisions, extractChoiceFormAnswers, scanChoiceControls } from '../utils/choiceControls';
 import type { ChoiceApplyResponse, ChoiceScanResponse } from '../types/choice';
+import { applyDropdownDecisions, scanDropdownControls } from '../utils/dropdownControls';
+import type { DropdownApplyResponse, DropdownScanResponse } from '../types/dropdown';
+import { disableScrollLock, enableScrollLock, withScrollLock } from '../utils/scrollLock';
 
 let lastPrescannedFingerprint: string | null = null;
+let lastStructureChangeNotificationAt = 0;
+let activeFormMutationCount = 0;
+let automatedFormMutationQuietUntil = 0;
+let automatedFormMutationBaselineTimer: ReturnType<typeof setTimeout> | undefined;
 const questionBorderOverlays = new Map<string, { target: HTMLElement; overlay: HTMLDivElement }>();
+
+function beginAutomatedFormMutation(): () => void {
+  activeFormMutationCount++;
+  enableScrollLock();
+  automatedFormMutationQuietUntil = 0;
+  if (automatedFormMutationBaselineTimer) clearTimeout(automatedFormMutationBaselineTimer);
+
+  return () => {
+    activeFormMutationCount = Math.max(0, activeFormMutationCount - 1);
+    disableScrollLock();
+    if (activeFormMutationCount > 0) return;
+
+    automatedFormMutationQuietUntil = Date.now() + 1700;
+    automatedFormMutationBaselineTimer = setTimeout(() => {
+      automatedFormMutationBaselineTimer = undefined;
+      if (activeFormMutationCount > 0) return;
+
+      void computeFormFingerprint().then((fingerprint) => {
+        if (activeFormMutationCount > 0) return;
+        lastPrescannedFingerprint = fingerprint;
+        lastStructureChangeNotificationAt = Date.now();
+      }).catch((error) => {
+        console.warn('[JobFill] Failed to refresh form fingerprint after autofill:', error);
+      }).finally(() => {
+        if (activeFormMutationCount === 0) automatedFormMutationQuietUntil = 0;
+      });
+    }, 1500);
+  };
+}
 
 function refreshQuestionBorderPositions(): void {
   for (const [selector, item] of questionBorderOverlays) {
@@ -79,6 +115,15 @@ function observeFormStructureChanges(): void {
   let revision = 0;
   const observer = new MutationObserver(() => {
     if (!lastPrescannedFingerprint) return;
+    const now = Date.now();
+    if (activeFormMutationCount > 0 || now < automatedFormMutationQuietUntil) {
+      revision++;
+      if (debounceTimer) clearTimeout(debounceTimer);
+      debounceTimer = undefined;
+      return;
+    }
+    if (now - lastStructureChangeNotificationAt < 1500) return;
+    lastStructureChangeNotificationAt = now;
     revision++;
     const observedRevision = revision;
     if (debounceTimer) clearTimeout(debounceTimer);
@@ -260,7 +305,7 @@ export default defineContentScript({
       (
         message: ContentScriptRequest,
         _sender,
-        sendResponse: (response: ScanFieldsResponse | FillFieldsResponse | AIScanFieldsResponse | InjectFileResponse | DetectJobPageResponse | WaitForFormReadyResponse | PrescanResponse | ChoiceScanResponse | ChoiceApplyResponse | { type: 'QUESTION_ANSWER_FILLED'; success: boolean }) => void,
+        sendResponse: (response: ScanFieldsResponse | FillFieldsResponse | AIScanFieldsResponse | InjectFileResponse | DetectJobPageResponse | WaitForFormReadyResponse | PrescanResponse | ChoiceScanResponse | ChoiceApplyResponse | DropdownScanResponse | DropdownApplyResponse | { type: 'QUESTION_ANSWER_FILLED'; success: boolean }) => void,
       ) => {
         switch (message.type) {
           case 'SCAN_FIELDS': {
@@ -311,6 +356,7 @@ export default defineContentScript({
               unknownFields: fields.filter((f) => f.category === 'UNKNOWN').length,
               fields,
             };
+            console.log(`[PIPELINE 1] Form scan found ${scanResult.totalFields} fields`);
             const { sanitizedFields, selectorLookup } = extractSanitizedFields();
 
             // Fingerprint is async (WebCrypto SHA-256) — use async response
@@ -340,19 +386,57 @@ export default defineContentScript({
           }
 
           case 'CHOICE_APPLY': {
+            const finishMutation = beginAutomatedFormMutation();
             applyChoiceDecisions(message.decisions).then((result) => {
               sendResponse({ type: 'CHOICE_APPLY_RESULT', ...result });
             }).catch((error) => {
               console.warn('[JobFill] Choice application failed:', error);
               sendResponse({ type: 'CHOICE_APPLY_RESULT', applied: [], unresolved: message.decisions.map((decision) => decision.controlId) });
+            }).finally(finishMutation);
+            return true;
+          }
+
+          case 'DROPDOWN_SCAN': {
+            withScrollLock(() => scanDropdownControls()).then((controls) => {
+              sendResponse({ type: 'DROPDOWN_SCAN_RESULT', controls });
+            }).catch((error) => {
+              console.warn('[JobFill] Dropdown scan failed:', error);
+              sendResponse({ type: 'DROPDOWN_SCAN_RESULT', controls: [] });
             });
             return true;
           }
 
+          case 'DROPDOWN_APPLY': {
+            const finishMutation = beginAutomatedFormMutation();
+            applyDropdownDecisions(message.decisions).then((result) => {
+              sendResponse({ type: 'DROPDOWN_APPLY_RESULT', ...result });
+            }).catch((error) => {
+              console.warn('[JobFill] Dropdown application failed:', error);
+              sendResponse({ type: 'DROPDOWN_APPLY_RESULT', applied: [], unresolved: message.decisions.map((decision) => decision.controlId) });
+            }).finally(finishMutation);
+            return true;
+          }
+
           case 'FILL_FIELDS': {
-            const fillResult = fillFields(message.mappings);
-            sendResponse({ type: 'FILL_FIELDS_RESULT', result: fillResult });
-            break;
+            const finishMutation = beginAutomatedFormMutation();
+            fillFields(message.mappings).then((result) => {
+              sendResponse({ type: 'FILL_FIELDS_RESULT', result });
+            }).catch((error) => {
+              console.warn('[JobFill] Field filling failed:', error);
+              sendResponse({
+                type: 'FILL_FIELDS_RESULT',
+                result: {
+                  totalFields: message.mappings.length,
+                  filledFields: 0,
+                  skippedSensitive: 0,
+                  skippedUnknown: 0,
+                  skippedExisting: 0,
+                  errors: message.mappings.length,
+                  fields: [],
+                },
+              });
+            }).finally(finishMutation);
+            return true;
           }
 
           case 'SET_QUESTION_PENDING': {
@@ -371,7 +455,12 @@ export default defineContentScript({
                   sendResponse({ type: 'QUESTION_ANSWER_FILLED', success: true });
                   break;
                 }
-                success = fillQuestionAnswer(element, message.answer);
+                const finishMutation = beginAutomatedFormMutation();
+                try {
+                  success = fillQuestionAnswer(element, message.answer);
+                } finally {
+                  finishMutation();
+                }
                 if (success) setQuestionBorderPending(message.selector, false);
               }
             } catch {

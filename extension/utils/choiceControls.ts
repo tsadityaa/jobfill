@@ -1,6 +1,7 @@
 import { getElementBySelector, getLabelText, getUniqueSelector, queryAcrossOpenShadowRoots } from './fieldDetector';
 import { fillQuestionAnswer } from './formFiller';
 import type { ChoiceControl, ChoiceDecision, ChoiceFormAnswer, ChoiceOption } from '../types/choice';
+import { safeClick, withScrollLock } from './scrollLock';
 
 const GROUP_SELECTOR = 'fieldset, [role="radiogroup"], [role="group"]';
 
@@ -51,33 +52,62 @@ function makeOptionId(index: number, label: string, value: string): string {
 }
 
 function labelForOption(element: HTMLElement): string {
+  // 1. Direct label attributes on the input/widget itself
   const directLabel = normalizeText(
     element.getAttribute('aria-label')
-    || element.getAttribute('data-label'),
+    || element.getAttribute('data-label')
+    || element.getAttribute('data-answer-value'),
   );
   if (directLabel) return directLabel;
 
-  // For native <input type="radio/checkbox">, the visible label text lives in
-  // an associated <label> element or a sibling — NOT in the input's value
-  // attribute. Try getLabelText() first (reads <label for="...">, wrapping
-  // <label>, aria-labelledby, preceding siblings, etc.).
+  const root = element.getRootNode();
+  const queryRoot = root instanceof ShadowRoot ? root : document;
+
+  // 2. Associated <label for="..."> if the element has an ID
+  if (element.id) {
+    const forLabel = queryRoot.querySelector<HTMLElement>(`label[for="${CSS.escape(element.id)}"]`);
+    if (forLabel) {
+      const clone = forLabel.cloneNode(true) as HTMLElement;
+      clone.querySelectorAll('input, [role="radio"], [role="checkbox"], svg').forEach((n) => n.remove());
+      const text = normalizeText(clone.textContent);
+      if (text) return text;
+    }
+  }
+
+  // 3. Wrapping <label>
+  const parentLabel = element.closest('label');
+  if (parentLabel) {
+    const clone = parentLabel.cloneNode(true) as HTMLElement;
+    clone.querySelectorAll('input, [role="radio"], [role="checkbox"], svg').forEach((n) => n.remove());
+    const text = normalizeText(clone.textContent);
+    if (text) return text;
+  }
+
+  // 4. For native HTMLInputElement
   if (element instanceof HTMLInputElement && (element.type === 'radio' || element.type === 'checkbox')) {
     const associatedLabel = normalizeText(getLabelText(element));
     if (associatedLabel) return associatedLabel;
-    // Fall back to value only if no visible label was found
     const val = normalizeText(element.value);
-    if (val) return val;
+    if (val && val !== 'on') return val;
     return '';
   }
 
-  // Google Forms nests the label text inside a span/div child alongside the
-  // radio circle. Walk children to find the best text-bearing node, avoiding
-  // picking up an empty circle or icon container.
+  // 5. Material / Google Forms / ARIA widgets: check child or sibling label containers
   if (element.getAttribute('role') === 'radio' || element.getAttribute('role') === 'checkbox') {
     const labelSpan = element.querySelector('[dir="auto"], [data-value], span');
     if (labelSpan) {
       const spanText = normalizeText(labelSpan.textContent);
       if (spanText) return spanText;
+    }
+
+    // Google Forms & Material Design: label container is a sibling in .docssharedWizToggleLabeledContainer or [role="listitem"]
+    const container = element.closest('.docssharedWizToggleLabeledContainer, [role="listitem"]');
+    if (container) {
+      const siblingText = container.querySelector('.YEVvod, .uLDsQb, [dir="auto"], .M7eMe');
+      if (siblingText) {
+        const text = normalizeText(siblingText.textContent);
+        if (text) return text;
+      }
     }
   }
 
@@ -88,52 +118,100 @@ function labelForOption(element: HTMLElement): string {
 }
 
 function questionFor(element: HTMLElement, group?: HTMLElement | null): string {
-  const legend = group?.querySelector('legend');
-  const labelledBy = group?.getAttribute('aria-labelledby') ?? element.getAttribute('aria-labelledby');
-  const describedBy = group?.getAttribute('aria-describedby') ?? element.getAttribute('aria-describedby');
   const root = group?.getRootNode() ?? element.getRootNode();
   const queryRoot = root instanceof ShadowRoot ? root : document;
+
+  const getElementByIdSafe = (id: string): HTMLElement | null => {
+    if (!id) return null;
+    if ('getElementById' in queryRoot && typeof (queryRoot as Document).getElementById === 'function') {
+      return (queryRoot as Document).getElementById(id);
+    }
+    return queryRoot.querySelector<HTMLElement>(`#${CSS.escape(id)}`);
+  };
+
+  const legend = group?.querySelector('legend');
+  const labelledBy = group?.getAttribute('aria-labelledby')
+    ?? group?.closest('[aria-labelledby]')?.getAttribute('aria-labelledby')
+    ?? element.getAttribute('aria-labelledby');
+
+  const describedBy = group?.getAttribute('aria-describedby') ?? element.getAttribute('aria-describedby');
+
   const labelledText = labelledBy
     ?.split(/\s+/)
-    .map((id) => queryRoot.getElementById(id)?.textContent ?? '')
+    .map((id) => getElementByIdSafe(id)?.textContent ?? '')
+    .filter(Boolean)
     .join(' ');
+
   const helpText = describedBy
     ?.split(/\s+/)
-    .map((id) => queryRoot.getElementById(id)?.textContent ?? '')
+    .map((id) => getElementByIdSafe(id)?.textContent ?? '')
+    .filter(Boolean)
     .join(' ');
+
   const groupLabel = normalizeText(
     legend?.textContent
     || group?.getAttribute('aria-label')
     || labelledText,
   );
 
-  // Google Forms: walk up to the question card ([role="listitem"]) and grab
-  // the heading text if no label/legend was found via standard ARIA attributes.
   let cardHeading = '';
   if (!groupLabel) {
     const anchor = group ?? element;
-    const card = anchor.closest<HTMLElement>('[role="listitem"]');
-    if (card) {
-      const heading = card.querySelector<HTMLElement>('[role="heading"], h1, h2, h3, h4');
+
+    // Check Google Forms card (.Qr7Oae or [jsmodel="CP1oW"])
+    const googleCard = anchor.closest<HTMLElement>('.Qr7Oae, [jsmodel="CP1oW"]');
+    if (googleCard) {
+      const heading = googleCard.querySelector<HTMLElement>('[role="heading"], .M7eMe, h1, h2, h3, h4');
       if (heading) cardHeading = normalizeText(heading.textContent);
+    }
+
+    // Walk up ancestors to find any question container with a heading/label
+    if (!cardHeading) {
+      let current: HTMLElement | null = anchor.parentElement;
+      while (current && current !== document.body) {
+        const isOptionRow = current.classList.contains('eBFWi') || current.classList.contains('checkbox') || current.classList.contains('radio');
+        if (!isOptionRow) {
+          const heading = current.querySelector<HTMLElement>(
+            ':scope > * [role="heading"], :scope > [role="heading"], [data-automation-id*="Label"], [data-automation-id*="label"], .application-label, .field-label, legend, h1, h2, h3, h4',
+          );
+          if (heading && !heading.contains(anchor)) {
+            const text = normalizeText(heading.textContent);
+            if (text && text.length < 300) {
+              cardHeading = text;
+              break;
+            }
+          }
+
+          if (current.getAttribute('role') === 'listitem') {
+            const cardH = current.querySelector<HTMLElement>('[role="heading"], h1, h2, h3, h4');
+            if (cardH && !cardH.contains(anchor)) {
+              const text = normalizeText(cardH.textContent);
+              if (text && text.length < 300) {
+                cardHeading = text;
+                break;
+              }
+            }
+          }
+        }
+        current = current.parentElement;
+      }
     }
   }
 
   const questionLabel = groupLabel || cardHeading;
-  const isGroupOption = element.getAttribute('role') === 'radio'
-    || element.getAttribute('role') === 'checkbox'
-    || element instanceof HTMLInputElement && ['radio', 'checkbox'].includes(element.type);
-  const isStandaloneCheckbox = element instanceof HTMLInputElement
-    && element.type === 'checkbox'
-    && !group;
-  const ownLabel = isGroupOption && !isStandaloneCheckbox ? '' : normalizeText(
-    getLabelText(element)
-    || element.getAttribute('aria-label')
-    || element.getAttribute('placeholder')
-    || element.getAttribute('name')
-    || element.id,
-  );
-  return normalizeText([questionLabel, ownLabel, helpText].filter(Boolean).join(' '));
+
+  let ownLabel = '';
+  if (!questionLabel) {
+    ownLabel = normalizeText(
+      getLabelText(element)
+      || element.getAttribute('aria-label')
+      || element.getAttribute('placeholder')
+      || '',
+    );
+  }
+
+  const shouldAppendHelp = helpText && !questionLabel.includes(helpText) && helpText.length < 150;
+  return normalizeText([questionLabel || ownLabel, shouldAppendHelp ? helpText : ''].filter(Boolean).join(' '));
 }
 
 function makeOption(
@@ -147,28 +225,74 @@ function makeOption(
   return { id: makeOptionId(index, label, value), label, value, disabled, selected, selector };
 }
 
+function findChoiceGroupRoot(input: HTMLElement, kind: 'radio' | 'checkbox'): HTMLElement | null {
+  // 1. Explicit ARIA and standard HTML groups
+  const explicitRoleGroup = input.closest<HTMLElement>('fieldset, [role="radiogroup"], [role="group"]');
+  if (explicitRoleGroup) return explicitRoleGroup;
+
+  // 2. Google Forms option list (checkboxes are grouped inside <div role="list" aria-labelledby="...">)
+  const listGroup = input.closest<HTMLElement>('[role="list"][aria-labelledby]');
+  if (listGroup) return listGroup;
+
+  // 3. Google Forms question card (.Qr7Oae or [jsmodel="CP1oW"])
+  const googleCard = input.closest<HTMLElement>('.Qr7Oae, [jsmodel="CP1oW"]');
+  if (googleCard) return googleCard;
+
+  // 4. ATS & framework question group containers (Workday, Lever, Greenhouse, etc.)
+  const atsGroup = input.closest<HTMLElement>(
+    '[data-automation-id*="Group"], [data-automation-id*="group"], [data-automation-id*="checkboxGroup"], [data-automation-id*="radioGroup"], .application-question, .application-field, .field--checkboxes, .field--radios',
+  );
+  if (atsGroup) return atsGroup;
+
+  // 5. Generic form containers (.form-group, .field, etc.) IF they contain multiple choices of this kind
+  const container = input.closest<HTMLElement>('.form-group, .form-field, .field, .question-wrapper, [data-automation-id*="question"]');
+  if (container) {
+    const selector = kind === 'radio'
+      ? 'input[type="radio"], [role="radio"]'
+      : 'input[type="checkbox"], [role="checkbox"]';
+    const choices = container.querySelectorAll(selector);
+    if (choices.length > 1) return container;
+  }
+
+  return null;
+}
+
 function getGroupedInputControls(): ChoiceControl[] {
   const hasForms = queryAcrossOpenShadowRoots<HTMLFormElement>('form').length > 0;
   const inputs = queryAcrossOpenShadowRoots<HTMLElement>(
     'input[type="radio"], input[type="checkbox"], [role="radio"], [role="checkbox"]',
   ).filter(isRendered).filter((input) =>
-    !hasForms || isWithinForm(input) || Boolean(input.closest('.form-group.field')),
+    !input.closest('[data-uxi-widget-type="multiselectlistitem"]')
+  ).filter((input) =>
+    !hasForms
+    || isWithinForm(input)
+    || Boolean(input.closest('.form-group, .field, [role="form"], [role="listitem"], .Qr7Oae, [jsmodel], [data-automation-id], .application-form, fieldset')),
   );
   const groups = new Map<string, { root: HTMLElement | null; kind: 'radio' | 'checkbox'; inputs: HTMLElement[] }>();
 
   for (const input of inputs) {
     const kind = input.getAttribute('type') === 'radio' || input.getAttribute('role') === 'radio' ? 'radio' : 'checkbox';
     const name = input.getAttribute('name');
-    const explicitRoleGroup = input.closest<HTMLElement>('[role="radiogroup"], [role="group"]');
-    const root = kind === 'checkbox' && !name
-      ? explicitRoleGroup
-      : input.closest<HTMLElement>(`${GROUP_SELECTOR}, .form-group.field`);
-    const scope = root
-      ? getUniqueSelector(root)
-      : name
-        ? `${input.closest('form') ? getUniqueSelector(input.closest('form')!) : 'document'}::${name}`
-        : getUniqueSelector(input);
-    const key = `${kind}::${scope}${name && root ? `::${name}` : ''}`;
+    const cleanName = name ? name.replace(/\[\d*\]$/, '') : null;
+    const root = findChoiceGroupRoot(input, kind);
+
+    let key: string;
+    if (root) {
+      const rootSelector = getUniqueSelector(root);
+      // For radio: radios inside a root container with the same name group together.
+      // For checkbox: all checkboxes inside the root container belong to this question.
+      key = kind === 'radio' && cleanName
+        ? `radio::${rootSelector}::${cleanName}`
+        : `${kind}::${rootSelector}`;
+    } else if (cleanName) {
+      // Inputs share the same name attribute in the form/document
+      const formScope = input.closest('form') ? getUniqueSelector(input.closest('form')!) : 'document';
+      key = `${kind}::${formScope}::${cleanName}`;
+    } else {
+      // Standalone single input
+      key = `${kind}::${getUniqueSelector(input)}`;
+    }
+
     const group = groups.get(key) ?? { root, kind, inputs: [] };
     group.inputs.push(input);
     groups.set(key, group);
@@ -185,16 +309,27 @@ function getGroupedInputControls(): ChoiceControl[] {
         ? input.disabled
         : input.getAttribute('aria-disabled') === 'true';
       const label = labelForOption(input);
-      const value = input instanceof HTMLInputElement ? input.value : input.getAttribute('data-value') || label;
+      const value = input instanceof HTMLInputElement
+        ? input.value
+        : input.getAttribute('data-answer-value') || input.getAttribute('data-value') || label;
       return makeOption(index, label, value, disabled, checked, getUniqueSelector(input));
     });
-    if (!options.length) return [];
+    const labeledOptions = options.filter((option) => option.label.trim().length > 0);
+    if (!question || !labeledOptions.length) {
+      console.info('[JobFill Choice] Skipping inaccessible choice group', {
+        kind,
+        question: question || '(missing label)',
+        inputCount: members.length,
+        labeledOptionCount: labeledOptions.length,
+      });
+      return [];
+    }
     return [{
       id: makeControlId(kind, question, options, selector),
       kind,
       selector,
       question,
-      options,
+      options: labeledOptions,
       multiple: kind === 'checkbox',
     }];
   });
@@ -282,9 +417,6 @@ export function extractChoiceFormAnswers(): ChoiceFormAnswer[] {
  * handlers silently ignore.
  */
 function simulateFullClick(element: HTMLElement): void {
-  // Scroll into view to ensure the element is interactable
-  element.scrollIntoView({ block: 'nearest', behavior: 'instant' });
-
   const rect = element.getBoundingClientRect();
   const cx = rect.left + rect.width / 2;
   const cy = rect.top + rect.height / 2;
@@ -399,8 +531,8 @@ function findAssociatedLabel(input: HTMLInputElement): HTMLLabelElement | null {
  * 5. simulateFullClick on the label
  */
 async function clickCheckableInput(element: HTMLInputElement, controlId: string, optionLabel: string): Promise<void> {
-  // --- Strategy 1: Native .click() ---
-  element.click();
+  // --- Strategy 1: Native .click() with scroll suppression ---
+  safeClick(element);
   if (await waitForCheckedState(element, true, 300)) return;
 
   console.warn('[JobFill Choice] native .click() did not change checked state; trying React fiber + setter', {
@@ -427,10 +559,10 @@ async function clickCheckableInput(element: HTMLInputElement, controlId: string,
     option: optionLabel,
   });
 
-  // --- Strategy 3: Click the associated <label> ---
+  // --- Strategy 3: Click the associated <label> with scroll suppression ---
   const label = findAssociatedLabel(element);
   if (label) {
-    label.click();
+    safeClick(label);
     if (await waitForCheckedState(element, true, 300)) return;
 
     console.warn('[JobFill Choice] label.click() did not work; trying simulateFullClick on label', {
@@ -496,17 +628,18 @@ function findOtherResponseField(optionElement: HTMLElement): HTMLInputElement | 
     const fields = Array.from(container.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>(
       'input:not([type]), input[type="text"], input[type="search"], textarea',
     )).filter((field) => isRendered(field) && !field.disabled && !field.readOnly);
-    const radioOptions = container.querySelectorAll('input[type="radio"], [role="radio"]');
-    if (fields.length === 1 && radioOptions.length <= 1) return fields[0];
+    const choiceOptions = container.querySelectorAll('input[type="radio"], [role="radio"], input[type="checkbox"], [role="checkbox"]');
+    if (fields.length === 1 && choiceOptions.length <= 1) return fields[0];
   }
   return null;
 }
 
 export async function applyChoiceDecisions(decisions: ChoiceDecision[]): Promise<{ applied: string[]; unresolved: string[] }> {
-  const controls = await scanChoiceControls();
-  const controlsById = new Map(controls.map((control) => [control.id, control]));
-  const applied: string[] = [];
-  const unresolved: string[] = [];
+  return withScrollLock(async () => {
+    const controls = await scanChoiceControls();
+    const controlsById = new Map(controls.map((control) => [control.id, control]));
+    const applied: string[] = [];
+    const unresolved: string[] = [];
   console.info(`[JobFill Choice] DOM apply received ${decisions.length} decisions`, decisions.map((decision) => ({
     id: decision.controlId,
     source: decision.source,
@@ -666,6 +799,7 @@ export async function applyChoiceDecisions(decisions: ChoiceDecision[]): Promise
     (success ? applied : unresolved).push(decision.controlId);
   }
 
-  console.info('[JobFill Choice] DOM apply complete', { applied, unresolved });
-  return { applied, unresolved };
+    console.info('[JobFill Choice] DOM apply complete', { applied, unresolved });
+    return { applied, unresolved };
+  });
 }

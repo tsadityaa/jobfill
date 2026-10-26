@@ -6,6 +6,7 @@ import type {
   Address,
   Education,
   Experience,
+  SchoolEducation,
 } from '../types/profile';
 import ProfileCard from './ProfileCard';
 import ArrayField from './ArrayField';
@@ -23,6 +24,30 @@ export default function ProfileSection({ profile, onSave }: ProfileSectionProps)
       onSave({ ...profile, [key]: value });
     },
     [profile, onSave],
+  );
+
+  const updateTwelfth = useCallback(
+    (key: keyof SchoolEducation, value: string) => {
+      const currentSec = profile.secondaryEducation ?? {};
+      const currentTwelfth = currentSec.twelfth ?? { institution: '' };
+      update('secondaryEducation', {
+        ...currentSec,
+        twelfth: { ...currentTwelfth, [key]: value },
+      });
+    },
+    [profile, update],
+  );
+
+  const updateTenth = useCallback(
+    (key: keyof SchoolEducation, value: string) => {
+      const currentSec = profile.secondaryEducation ?? {};
+      const currentTenth = currentSec.tenth ?? { institution: '' };
+      update('secondaryEducation', {
+        ...currentSec,
+        tenth: { ...currentTenth, [key]: value },
+      });
+    },
+    [profile, update],
   );
 
   const summaryText = (items: { primary?: boolean; value?: string; label?: string }[]) => {
@@ -416,6 +441,10 @@ export default function ProfileSection({ profile, onSave }: ProfileSectionProps)
         subtitle={
           profile.education.length > 0
             ? `${profile.education[0].degree} — ${profile.education[0].institution}`
+            : profile.secondaryEducation?.twelfth?.institution
+            ? `12th — ${profile.secondaryEducation.twelfth.institution}`
+            : profile.secondaryEducation?.tenth?.institution
+            ? `10th — ${profile.secondaryEducation.tenth.institution}`
             : 'Not set'
         }
         staggerIndex={4}
@@ -530,6 +559,133 @@ export default function ProfileSection({ profile, onSave }: ProfileSectionProps)
             );
           }}
         />
+
+        {/* --- Minimal Secondary Education (12th & 10th) --- */}
+        <div style={{ marginTop: '16px', paddingTop: '14px', borderTop: '1px solid var(--color-pc-border)' }}>
+          {/* 12th / PU / Junior College */}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '4px' }}>
+            <span style={{ fontSize: '0.68rem', fontWeight: 600, color: 'var(--color-pc-accent-start)', textTransform: 'uppercase', letterSpacing: '0.08em', fontFamily: 'var(--font-mono)' }}>
+              Class 12th / PU / Junior College
+            </span>
+          </div>
+
+          <div className="form-group" style={{ marginTop: '6px' }}>
+            <label className="form-label">
+              PU / College / School Name
+              <CopyButton value={profile.secondaryEducation?.twelfth?.institution || ''} label="12th college" />
+            </label>
+            <input
+              id="profile-12th-institution"
+              className="form-input"
+              type="text"
+              placeholder="e.g. Sri Chaitanya / Narayana / DPS"
+              value={profile.secondaryEducation?.twelfth?.institution ?? ''}
+              onChange={(e) => updateTwelfth('institution', e.target.value)}
+            />
+          </div>
+
+          <div className="form-row-3" style={{ marginTop: '8px' }}>
+            <div className="form-group" style={{ marginTop: 0 }}>
+              <label className="form-label">
+                Percentage / GPA
+                <CopyButton value={profile.secondaryEducation?.twelfth?.percentage || ''} label="12th percentage" />
+              </label>
+              <input
+                id="profile-12th-percentage"
+                className="form-input"
+                type="text"
+                placeholder="e.g. 92% or 9.2"
+                value={profile.secondaryEducation?.twelfth?.percentage ?? ''}
+                onChange={(e) => updateTwelfth('percentage', e.target.value)}
+              />
+            </div>
+            <div className="form-group" style={{ marginTop: 0 }}>
+              <label className="form-label">Passing Year</label>
+              <input
+                id="profile-12th-year"
+                className="form-input"
+                type="text"
+                placeholder="e.g. 2022"
+                value={profile.secondaryEducation?.twelfth?.year ?? ''}
+                onChange={(e) => updateTwelfth('year', e.target.value)}
+              />
+            </div>
+            <div className="form-group" style={{ marginTop: 0 }}>
+              <label className="form-label">Board / Stream</label>
+              <input
+                id="profile-12th-board"
+                className="form-input"
+                type="text"
+                placeholder="CBSE / State"
+                value={profile.secondaryEducation?.twelfth?.board ?? ''}
+                onChange={(e) => updateTwelfth('board', e.target.value)}
+              />
+            </div>
+          </div>
+
+          {/* 10th / High School */}
+          <div style={{ marginTop: '16px', paddingTop: '12px', borderTop: '1px solid rgba(0, 212, 255, 0.06)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '4px' }}>
+              <span style={{ fontSize: '0.68rem', fontWeight: 600, color: 'var(--color-pc-accent-start)', textTransform: 'uppercase', letterSpacing: '0.08em', fontFamily: 'var(--font-mono)' }}>
+                Class 10th / High School
+              </span>
+            </div>
+
+            <div className="form-group" style={{ marginTop: '6px' }}>
+              <label className="form-label">
+                School Name
+                <CopyButton value={profile.secondaryEducation?.tenth?.institution || ''} label="10th school" />
+              </label>
+              <input
+                id="profile-10th-institution"
+                className="form-input"
+                type="text"
+                placeholder="e.g. Kendriya Vidyalaya / St. Joseph's"
+                value={profile.secondaryEducation?.tenth?.institution ?? ''}
+                onChange={(e) => updateTenth('institution', e.target.value)}
+              />
+            </div>
+
+            <div className="form-row-3" style={{ marginTop: '8px' }}>
+              <div className="form-group" style={{ marginTop: 0 }}>
+                <label className="form-label">
+                  Percentage / GPA
+                  <CopyButton value={profile.secondaryEducation?.tenth?.percentage || ''} label="10th percentage" />
+                </label>
+                <input
+                  id="profile-10th-percentage"
+                  className="form-input"
+                  type="text"
+                  placeholder="e.g. 90% or 9.0"
+                  value={profile.secondaryEducation?.tenth?.percentage ?? ''}
+                  onChange={(e) => updateTenth('percentage', e.target.value)}
+                />
+              </div>
+              <div className="form-group" style={{ marginTop: 0 }}>
+                <label className="form-label">Passing Year</label>
+                <input
+                  id="profile-10th-year"
+                  className="form-input"
+                  type="text"
+                  placeholder="e.g. 2020"
+                  value={profile.secondaryEducation?.tenth?.year ?? ''}
+                  onChange={(e) => updateTenth('year', e.target.value)}
+                />
+              </div>
+              <div className="form-group" style={{ marginTop: 0 }}>
+                <label className="form-label">Board</label>
+                <input
+                  id="profile-10th-board"
+                  className="form-input"
+                  type="text"
+                  placeholder="CBSE / State"
+                  value={profile.secondaryEducation?.tenth?.board ?? ''}
+                  onChange={(e) => updateTenth('board', e.target.value)}
+                />
+              </div>
+            </div>
+          </div>
+        </div>
       </ProfileCard>
 
       {/* ===== EXPERIENCE ===== */}

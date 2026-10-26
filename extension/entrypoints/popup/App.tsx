@@ -1,18 +1,43 @@
 import { useState, useEffect, useCallback } from 'react';
 import type { UserProfile } from '../../types/profile';
 import { createEmptyProfile } from '../../types/profile';
-import { cloudGetProfile, cloudSaveProfile } from '../../utils/cloudStorage';
+import { cloudGetProfile, cloudGetProfileWithStatus, cloudSaveProfile } from '../../utils/cloudStorage';
 import { supabase, getCurrentUser, signOut } from '../../utils/supabase';
+import { isProfileEmpty } from '../../utils/resumeParser';
 import Navigation from '../../components/Navigation';
 import ProfileSection from '../../components/ProfileSection';
 import AutofillButton from '../../components/AutofillButton';
 import AgentChat from '../../components/AgentChat';
 import DocumentsSection from '../../components/DocumentsSection';
 import LoginScreen from '../../components/LoginScreen';
+import OnboardingWizard from '../../components/OnboardingWizard';
 import type { User } from '@supabase/supabase-js';
 import { addMemory, syncProfileToMemory } from '../../utils/memory';
 
 type TabId = 'details' | 'documents' | 'agent';
+
+async function getOnboardingDone(userId: string): Promise<boolean> {
+  try {
+    if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+      const res = await chrome.storage.local.get(`jobfill_onboarding_done_${userId}`);
+      if (res[`jobfill_onboarding_done_${userId}`]) return true;
+    }
+  } catch (e) {
+    // fallback
+  }
+  return sessionStorage.getItem(`jobfill_onboarding_done_${userId}`) === 'true';
+}
+
+async function markOnboardingDone(userId: string): Promise<void> {
+  try {
+    if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+      await chrome.storage.local.set({ [`jobfill_onboarding_done_${userId}`]: true });
+    }
+  } catch (e) {
+    // fallback
+  }
+  sessionStorage.setItem(`jobfill_onboarding_done_${userId}`, 'true');
+}
 
 export default function App() {
   const [authChecked, setAuthChecked] = useState(false);
@@ -29,6 +54,7 @@ export default function App() {
   const [profile, setProfile] = useState<UserProfile>(createEmptyProfile());
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [showOnboarding, setShowOnboarding] = useState(false);
 
   // Check auth state on mount
   useEffect(() => {
@@ -59,16 +85,30 @@ export default function App() {
     }
 
     async function loadProfile() {
+      if (!user) return;
       setLoading(true);
       try {
-        const p = await cloudGetProfile();
+        const { profile: p, hasSavedProfile } = await cloudGetProfileWithStatus();
         setProfile(p);
-        if (user) {
-          syncProfileToMemory(user.id, p).catch(console.error);
+
+        // Check if user has already completed/skipped onboarding on this client
+        const onboardingDoneLocally = await getOnboardingDone(user.id);
+        const empty = isProfileEmpty(p);
+
+        // Show onboarding if:
+        // - User hasn't finished/dismissed onboarding locally
+        // - AND (either they have no saved cloud profile OR their profile is bare OAuth)
+        if (!onboardingDoneLocally && (!hasSavedProfile || empty)) {
+          setShowOnboarding(true);
+        } else {
+          setShowOnboarding(false);
         }
+
+        syncProfileToMemory(user.id, p).catch(console.error);
       } catch (err) {
         console.error('Failed to load profile:', err);
         setProfile(createEmptyProfile());
+        setShowOnboarding(true);
       }
       setLoading(false);
     }
@@ -86,6 +126,7 @@ export default function App() {
     await signOut();
     setUser(null);
     setProfile(createEmptyProfile());
+    setShowOnboarding(false);
   }, []);
 
   // Save profile to cloud
@@ -104,7 +145,34 @@ export default function App() {
     } finally {
       setTimeout(() => setSaving(false), 500);
     }
-  }, []);
+  }, [user]);
+
+  // Handle onboarding complete — save the profile from the wizard
+  const handleOnboardingComplete = useCallback(async (onboardedProfile: UserProfile) => {
+    setProfile(onboardedProfile);
+    setShowOnboarding(false);
+    if (user) {
+      await markOnboardingDone(user.id);
+    }
+    setSaving(true);
+    try {
+      await cloudSaveProfile(onboardedProfile);
+      if (user) {
+        await syncProfileToMemory(user.id, onboardedProfile).catch(console.error);
+      }
+    } catch (err) {
+      console.error('Failed to save onboarding profile:', err);
+    } finally {
+      setTimeout(() => setSaving(false), 500);
+    }
+  }, [user]);
+
+  const handleOnboardingSkip = useCallback(async () => {
+    setShowOnboarding(false);
+    if (user) {
+      await markOnboardingDone(user.id);
+    }
+  }, [user]);
 
   // ---- Auth Check Loading ----
 
@@ -161,6 +229,18 @@ export default function App() {
     );
   }
 
+  // ---- First-time User Onboarding ----
+
+  if (showOnboarding) {
+    return (
+      <OnboardingWizard
+        initialProfile={profile}
+        onComplete={handleOnboardingComplete}
+        onSkip={handleOnboardingSkip}
+      />
+    );
+  }
+
   // ---- Main App ----
 
   return (
@@ -182,13 +262,23 @@ export default function App() {
               Saved
             </span>
           ) : (
-            <button
-              className="btn-lock"
-              onClick={handleSignOut}
-              title="Sign out"
-            >
-              🚪 Sign Out
-            </button>
+            <div style={{ display: 'flex', gap: '6px' }}>
+              <button
+                className="btn-lock"
+                onClick={() => setShowOnboarding(true)}
+                title="Launch setup wizard to fill or update profile"
+                style={{ fontSize: '0.72rem', padding: '4px 8px' }}
+              >
+                ⚡ Setup
+              </button>
+              <button
+                className="btn-lock"
+                onClick={handleSignOut}
+                title="Sign out"
+              >
+                🚪 Sign Out
+              </button>
+            </div>
           )}
         </div>
         {user.email && (

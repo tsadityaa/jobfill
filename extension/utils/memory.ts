@@ -73,6 +73,27 @@ export function formatProfileForMemory(profile: UserProfile): string {
     if (edu.description) parts.push(`Education details: ${edu.description}`);
   }
 
+  // Secondary Education (Class 12th / PUC & Class 10th / School)
+  if (profile.secondaryEducation?.twelfth?.institution) {
+    const tw = profile.secondaryEducation.twelfth;
+    const details = [
+      tw.percentage ? `Percentage/Score: ${tw.percentage}` : '',
+      tw.year ? `Passing Year: ${tw.year}` : '',
+      tw.board ? `Board: ${tw.board}` : '',
+      tw.stream ? `Stream: ${tw.stream}` : '',
+    ].filter(Boolean).join(', ');
+    parts.push(`Class 12th / Pre-University / Junior College: ${tw.institution}${details ? ` (${details})` : ''}`);
+  }
+  if (profile.secondaryEducation?.tenth?.institution) {
+    const te = profile.secondaryEducation.tenth;
+    const details = [
+      te.percentage ? `Percentage/Score: ${te.percentage}` : '',
+      te.year ? `Passing Year: ${te.year}` : '',
+      te.board ? `Board: ${te.board}` : '',
+    ].filter(Boolean).join(', ');
+    parts.push(`Class 10th / Secondary High School: ${te.institution}${details ? ` (${details})` : ''}`);
+  }
+
   // Professional
   if (profile.professional.linkedin) parts.push(`LinkedIn: ${profile.professional.linkedin}`);
   if (profile.professional.github) parts.push(`GitHub: ${profile.professional.github}`);

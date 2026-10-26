@@ -17,12 +17,87 @@ export type FieldCategory = 'SAFE_AUTO' | 'APPLICATION_QUESTION' | 'FILE_UPLOAD'
  * Uses dot notation to reference nested profile values.
  */
 export type ProfileFieldKey =
+  // Personal
   | 'personal.firstName'
   | 'personal.middleName'
   | 'personal.lastName'
   | 'personal.fullName'
   | 'personal.dateOfBirth'
+  | 'personal.gender'
+
+  // Contact
+  | 'contact.primaryPhoneNumber'
+  | 'contact.primaryEmailAddress'
+  | 'contact.personalEmailAddress'
+  | 'contact.universityEmailAddress'
+
+  // Address
+  | 'address.primary.streetAddressLine1'
+  | 'address.primary.streetAddressLine2'
+  | 'address.primary.city'
+  | 'address.primary.state'
+  | 'address.primary.postalCode'
+  | 'address.primary.country'
+  | 'address.primary.fullAddress'
+
+  // Compound Address
+  | 'address.primary.streetAddressLine1AndLine2'
+  | 'address.primary.streetAddressAndCity'
+  | 'address.primary.streetAddressCityAndState'
+  | 'address.primary.streetAddressCityStateAndPostalCode'
+  | 'address.primary.cityAndState'
+  | 'address.primary.cityAndPostalCode'
+  | 'address.primary.cityAndCountry'
+  | 'address.primary.stateAndPostalCode'
+  | 'address.primary.stateAndCountry'
+  | 'address.primary.postalCodeAndCountry'
+  | 'address.primary.cityStateAndPostalCode'
+  | 'address.primary.cityStateAndCountry'
+  | 'address.primary.cityPostalCodeAndCountry'
+  | 'address.primary.statePostalCodeAndCountry'
+  | 'address.primary.cityStatePostalCodeAndCountry'
+
+  // Education
+  | 'education.current.institutionName'
+  | 'education.current.registrationNumber'
+  | 'education.current.degree'
+  | 'education.current.fieldOfStudy'
+  | 'education.current.startDate'
+  | 'education.current.endDate'
+  | 'education.current.gpaOrPercentage'
+  | 'education.current.isCurrentlyStudying'
+  // Education by level: UG / PG / PhD / highest (picked by degree text)
+  | `education.${'ug' | 'pg' | 'phd' | 'highest'}.${'institutionName' | 'degree' | 'fieldOfStudy' | 'startDate' | 'endDate' | 'gpaOrPercentage'}`
+  // Secondary Education (12th & 10th)
+  | 'education.twelfth.institutionName'
+  | 'education.twelfth.percentage'
+  | 'education.twelfth.passingYear'
+  | 'education.twelfth.board'
+  | 'education.twelfth.stream'
+  | 'education.tenth.institutionName'
+  | 'education.tenth.percentage'
+  | 'education.tenth.passingYear'
+  | 'education.tenth.board'
+
+  // Experience
+  | 'experience.current.companyName'
+  | 'experience.current.jobTitle'
+  | 'experience.current.location'
+  | 'experience.current.startDate'
+  | 'experience.current.endDate'
+  | 'experience.current.description'
+  | 'experience.current.isCurrentlyEmployed'
+
+  // Professional
+  | 'professional.linkedinProfileUrl'
+  | 'professional.githubProfileUrl'
+  | 'professional.portfolioUrl'
+  | 'professional.skills'
+
+  // Application
   | 'application.expectedJoiningDate'
+
+  // Legacy aliases (for backward compatibility)
   | 'phones.primary'
   | 'emails.primary'
   | 'emails.personal'
@@ -50,8 +125,7 @@ export type ProfileFieldKey =
   | 'experience.latest.description'
   | 'professional.linkedin'
   | 'professional.github'
-  | 'professional.portfolio'
-  | 'professional.skills';
+  | 'professional.portfolio';
 
 /**
  * Represents a form field detected on a webpage.

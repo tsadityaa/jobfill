@@ -12,6 +12,7 @@ export interface UserProfile {
   emails: EmailAddress[];
   addresses: Address[];
   education: Education[];
+  secondaryEducation?: SecondaryEducation;
   experience: Experience[];
   professional: ProfessionalInfo;
 }
@@ -71,6 +72,20 @@ export interface Education {
   description?: string;
 }
 
+// Secondary Education (Class 12th / PUC & Class 10th / School)
+export interface SchoolEducation {
+  institution: string;
+  percentage?: string;
+  year?: string;
+  board?: string;
+  stream?: string;
+}
+
+export interface SecondaryEducation {
+  twelfth?: SchoolEducation;
+  tenth?: SchoolEducation;
+}
+
 // ---- Experience ----
 
 export interface Experience {
@@ -105,6 +120,10 @@ export function createEmptyProfile(): UserProfile {
     emails: [],
     addresses: [],
     education: [],
+    secondaryEducation: {
+      twelfth: { institution: '', percentage: '', year: '', board: '', stream: '' },
+      tenth: { institution: '', percentage: '', year: '', board: '' },
+    },
     experience: [],
     professional: {
       skills: [],

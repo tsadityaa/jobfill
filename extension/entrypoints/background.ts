@@ -50,11 +50,17 @@ import type { QuestionTask } from '../types/questionTask';
 import type { FileUploadTask } from '../types/fileUploadTask';
 import type { StoredDocument } from '../types/document';
 import type { ChoiceControl, ChoiceDecision, ChoiceEvidence } from '../types/choice';
+import type { DropdownControl, DropdownDecision } from '../types/dropdown';
+import { resolveDropdownsWithAI } from '../utils/dropdownResolver';
+import { isDropdownPlaceholder } from '../utils/dropdownControls';
+import { shouldSkipDuplicateScan } from '../utils/scanCoalescer';
 import type { UserProfile } from '../types/profile';
 
 /** In-memory guard: prevent concurrent pre-scans for the same tab */
 const runningTabs = new Set<number>();
 const pendingPrescanTabs = new Set<number>();
+const lastPrescanAtByTab = new Map<number, number>();
+const lastDropdownPipelineAtByTab = new Map<number, number>();
 const pendingGoogleFormFrames = new Map<number, number>();
 const pendingQuestionAutofillTabs = new Map<number, boolean>();
 const runningChoiceTabs = new Set<number>();
@@ -157,18 +163,71 @@ async function requestChoiceApply(tabId: number): Promise<void> {
   if (runningChoiceTabs.has(tabId)) pendingChoiceApplyTabs.add(tabId);
   else void runChoicePipeline(tabId, progress.frameId, progress.url);
 }
-const GOOGLE_FORM_INTENT_KEYS: ProfileFieldKey[] = [
-  ...ALL_INTENT_KEYS,
-  'education.latest.registrationNo',
-  'addresses.primary.cityState',
-];
+const GOOGLE_FORM_INTENT_KEYS: ProfileFieldKey[] = ALL_INTENT_KEYS;
+
 const GOOGLE_FORM_INTENT_DESCRIPTIONS: Partial<Record<ProfileFieldKey, string>> = {
-  'addresses.primary.full': 'The user\'s complete primary mailing or home address, combining street lines, city, state or region, postal code, and country when a form asks for one address field.',
-  'addresses.primary.line1': 'The street address or first address line, such as house number and street name.',
-  'education.latest.registrationNo': 'A student identifier recorded with education, such as an academic registration, enrollment, or roll identifier assigned by a school, college, or university.',
-  'addresses.primary.cityState': 'The primary address city and state combined into a single text value.',
-  'education.latest.institution': 'The school, college, university, or other educational institution attended by the user.',
-  'education.latest.field': 'The user\'s academic department, department of study, major, discipline, specialization, program, or field of study.',
+  'personal.fullName': 'The user\'s complete name (first, middle, and last name combined), especially for single "Name", "Your name", or "Full Name" questions.',
+  'personal.gender': 'The applicant\'s gender (e.g., Male, Female, Other, Prefer not to say).',
+  'contact.primaryPhoneNumber': 'The applicant\'s primary contact phone number, mobile number, or WhatsApp number with country code.',
+  'contact.primaryEmailAddress': 'The applicant\'s primary contact or general email address.',
+  'contact.personalEmailAddress': 'The applicant\'s personal email address (e.g. gmail.com).',
+  'contact.universityEmailAddress': 'The applicant\'s college, university, or institutional student email address (e.g. .edu or .ac).',
+  'education.current.institutionName': 'The school, college, university, or academic institution the applicant studies in or recently attended.',
+  'education.current.registrationNumber': 'Academic registration number, student enrollment number, roll number, college ID, or university seat number (USN).',
+  'education.current.degree': 'Degree or academic qualification (e.g., B.Tech, B.E., B.S., M.S., High School).',
+  'education.current.fieldOfStudy': 'Academic department, major, discipline, branch, specialization, or program of study (e.g., Computer Science).',
+  'education.current.gpaOrPercentage': 'Grade Point Average (GPA), Cumulative GPA (CGPA), academic percentage, or marks.',
+  'education.current.isCurrentlyStudying': 'Indicates whether the applicant is currently an enrolled active student.',
+  'education.ug.institutionName': 'College/university of the applicant\'s undergraduate (UG / Bachelor\'s / B.Tech / graduation) degree.',
+  'education.ug.degree': 'Undergraduate (UG / Bachelor\'s) degree name, e.g. B.Tech, B.E., B.Sc.',
+  'education.ug.fieldOfStudy': 'Branch, specialization, or major of the undergraduate degree.',
+  'education.ug.gpaOrPercentage': 'CGPA, GPA, or percentage of the undergraduate degree.',
+  'education.ug.startDate': 'Start date or year of the undergraduate degree.',
+  'education.ug.endDate': 'End, passing, or graduation date/year of the undergraduate degree.',
+  'education.pg.institutionName': 'College/university of the applicant\'s postgraduate (PG / Master\'s / M.Tech / MBA) degree.',
+  'education.pg.degree': 'Postgraduate (PG / Master\'s) degree name, e.g. M.Tech, MBA, M.Sc.',
+  'education.pg.fieldOfStudy': 'Branch, specialization, or major of the postgraduate degree.',
+  'education.pg.gpaOrPercentage': 'CGPA, GPA, or percentage of the postgraduate degree.',
+  'education.pg.startDate': 'Start date or year of the postgraduate degree.',
+  'education.pg.endDate': 'End, passing, or graduation date/year of the postgraduate degree.',
+  'education.phd.institutionName': 'University/institute of the applicant\'s PhD / doctorate / post-doctoral program.',
+  'education.phd.degree': 'Doctorate degree name, e.g. PhD.',
+  'education.phd.fieldOfStudy': 'Research area, specialization, or discipline of the PhD.',
+  'education.phd.gpaOrPercentage': 'CGPA, GPA, or percentage of the PhD.',
+  'education.phd.startDate': 'Start date or year of the PhD.',
+  'education.phd.endDate': 'End or completion date/year of the PhD.',
+  'education.highest.institutionName': 'Institution of the applicant\'s highest qualification.',
+  'education.highest.degree': 'The applicant\'s highest qualification / highest degree obtained or pursuing.',
+  'education.highest.fieldOfStudy': 'Specialization of the applicant\'s highest qualification.',
+  'education.highest.gpaOrPercentage': 'CGPA or percentage of the applicant\'s highest qualification.',
+  'education.highest.startDate': 'Start date or year of the highest qualification.',
+  'education.highest.endDate': 'End or passing date/year of the highest qualification.',
+  'education.twelfth.institutionName': 'The junior college, intermediate college, PU college, or senior secondary school attended for 12th grade.',
+  'education.twelfth.percentage': '12th standard (PUC / HSC / Intermediate / Senior Secondary) percentage, marks, or GPA.',
+  'education.twelfth.passingYear': 'The passing or graduation year of 12th grade / PUC / Intermediate.',
+  'education.twelfth.board': '12th standard education board (e.g. CBSE, ISC, State Board).',
+  'education.twelfth.stream': '12th standard stream or specialization (e.g. Science, Commerce, Arts, MPC, BiPC).',
+  'education.tenth.institutionName': 'The high school or secondary school attended for 10th grade (SSLC / Matriculation).',
+  'education.tenth.percentage': '10th standard (SSLC / Matriculation / Secondary) percentage, marks, or GPA.',
+  'education.tenth.passingYear': 'The passing year of 10th grade / SSLC.',
+  'education.tenth.board': '10th standard education board (e.g. CBSE, ICSE, State Board).',
+  'experience.current.companyName': 'The organization or company name of the applicant\'s current or most recent job or internship.',
+  'experience.current.jobTitle': 'The applicant\'s current or most recent job title, role, or designation (e.g. Software Engineer Intern).',
+  'experience.current.isCurrentlyEmployed': 'Indicates whether the applicant is currently working or employed.',
+  'professional.linkedinProfileUrl': 'Direct URL to the applicant\'s LinkedIn profile page.',
+  'professional.githubProfileUrl': 'Direct URL to the applicant\'s GitHub profile or code repository profile.',
+  'professional.portfolioUrl': 'Direct URL to the applicant\'s portfolio website, personal homepage, or online resume link.',
+  'professional.skills': 'Comma-separated list of the applicant\'s technical and professional skills.',
+  'application.expectedJoiningDate': 'Expected start date, date of joining, or earliest availability date for the role.',
+  'address.primary.fullAddress': 'Complete primary residential address combining street lines, city, state, postal code, and country.',
+  'address.primary.streetAddressLine1': 'First street address line (house/flat number, building, street name).',
+  'address.primary.streetAddressLine2': 'Second street address line (apartment, suite, unit, floor).',
+  'address.primary.city': 'City, town, or municipality.',
+  'address.primary.state': 'State, province, or region.',
+  'address.primary.postalCode': 'Postal code, ZIP code, or PIN code.',
+  'address.primary.country': 'Country or nation of residence.',
+  'address.primary.cityAndState': 'City and state combined into a single text value (e.g. "San Francisco, CA").',
+  'address.primary.cityAndCountry': 'City and country combined into a single text value.',
 };
 
 function isGoogleFormsUrl(url: string): boolean {
@@ -327,7 +386,7 @@ async function runQuestionPipeline(
   const detected = detectApplicationQuestions(fields);
   const existingState = await getQuestionState(tabId);
   const pendingAutofill = pendingQuestionAutofillTabs.get(tabId) ?? false;
-  const autofillRequested = existingState?.autofillRequested || pendingAutofill;
+  const autofillRequested = (existingState?.url === url && existingState.autofillRequested) || pendingAutofill;
 
   const existingSelectors = new Set(existingState?.tasks.map((t) => t.selector) ?? []);
   const existingCount = existingState?.tasks.length ?? 0;
@@ -346,6 +405,13 @@ async function runQuestionPipeline(
   const state = { tabId, url, frameId, autofillRequested, tasks: allTasks };
   await setQuestionState(state);
   console.log(`[JobFill BG] Tab ${tabId}: detected ${newTasks.length} new application question fields (total: ${allTasks.length})`);
+  if (import.meta.env.DEV) {
+    console.info('[Pipeline 2/5] Questions queued', {
+      tabId,
+      newQuestions: newTasks.map(({ fieldId, question }) => ({ fieldId, question })),
+      alreadyRequestedByUser: autofillRequested,
+    });
+  }
   if (newTasks.length === 0) return;
 
   void processQuestionTasks(tabId, newTasks);
@@ -368,6 +434,15 @@ async function processQuestionTasks(tabId: number, tasks: QuestionTask[]): Promi
   await Promise.all(tasks.map(async (task) => {
     try {
       const memories = userId ? await searchMemory(userId, task.question) : [];
+      if (import.meta.env.DEV) {
+        console.info('[Pipeline 2/5] OpenRouter context prepared', {
+          tabId,
+          fieldId: task.fieldId,
+          question: task.question,
+          profileFactCount: profileContext.split('\n').filter(Boolean).length,
+          memoryCount: memories.length,
+        });
+      }
       await updateQuestionTask(tabId, task.fieldId, { status: 'GENERATING' });
       const answer = await generateApplicationAnswer(task.question, memories, profileContext);
       if (!answer) throw new Error('No grounded answer was available from saved memories.');
@@ -375,6 +450,14 @@ async function processQuestionTasks(tabId: number, tasks: QuestionTask[]): Promi
 
       const currentState = await getQuestionState(tabId);
       const isAutofillRequested = currentState?.autofillRequested || pendingQuestionAutofillTabs.get(tabId) === true;
+      if (import.meta.env.DEV) {
+        console.info('[Pipeline 2/5] OpenRouter answer ready', {
+          tabId,
+          fieldId: task.fieldId,
+          answer,
+          fillGate: isAutofillRequested ? 'user requested fill; filling now' : 'waiting for Scan Current Page',
+        });
+      }
       if (isAutofillRequested) {
         console.log(`[JobFill BG] Tab ${tabId}: auto-filling question task ${task.fieldId} immediately upon AI completion`);
         await fillQuestionTask(tabId, { ...task, answer, status: 'READY_TO_FILL' });
@@ -484,6 +567,7 @@ async function runChoicePipeline(tabId: number, frameId: number, url: string): P
     const appliedIds = new Set(progress.appliedControlIds);
 
     for (const control of controls) {
+      if (control.multiple) continue;
       if (!hasSelectedChoice(control)) continue;
       const selected = control.options.find((option) => option.selected && !option.disabled);
       if (isOverridableChoice(control, selected)) {
@@ -525,108 +609,217 @@ async function runChoicePipeline(tabId: number, frameId: number, url: string): P
         void syncProfileToMemory(userId, profile).catch(console.error);
       }
 
+      const userWantsApply = progress.applyRequested || choiceApplyRequestedTabs.has(tabId);
       const decisions: ChoiceDecision[] = [];
       const evidenceByControl = new Map<string, ChoiceEvidence>();
 
-      // 1. Parallel Supermemory retrieval for all candidate questions
-      console.info(`[JobFill Choice] Tab ${tabId}: querying Supermemory for ${candidates.length} candidate questions`);
-      const memoryResults = await Promise.all(candidates.map(async (control) => {
-        if (!userId) return { control, matches: [] as string[] };
-        const query = control.question.trim();
-        return { control, matches: await searchMemory(userId, query) };
-      }));
-      const memoryByControlId = new Map(memoryResults.map(({ control, matches }) => [control.id, matches]));
-
-      // 2. Assemble complete evidence and check cache
-      const aiRequests: Array<{ control: ChoiceControl; evidence: ChoiceEvidence }> = [];
+      // =========================================================================
+      // STAGE 1: Profile-only Cache Check & OpenRouter Call #1
+      // (NO Supermemory calls upfront — saves time, tokens, and API quota)
+      // =========================================================================
+      const uncachedCandidates: ChoiceControl[] = [];
       for (const control of candidates) {
         const profileFacts = profile ? getRelevantProfileFacts(profile, control.question) : [];
         const relevantFormAnswers = getRelevantChoiceFormAnswers(
           control,
           formAnswers.map(({ question, answer }) => `${question}: ${answer}`),
         );
-        const memories = (memoryByControlId.get(control.id) ?? []).slice(0, 5);
-        const evidence: ChoiceEvidence = { profileFacts, memories, formAnswers: relevantFormAnswers };
-        evidenceByControl.set(control.id, evidence);
+        const profileOnlyEvidence: ChoiceEvidence = { profileFacts, memories: [], formAnswers: relevantFormAnswers };
+        evidenceByControl.set(control.id, profileOnlyEvidence);
 
-        const cached = await getCachedChoice(control, evidence);
+        const cached = await getCachedChoice(control, profileOnlyEvidence);
         if (cached) {
           decisions.push(cached);
-          console.info(`[JobFill Choice] Tab ${tabId}: ${control.id} ✓ resolved from choice cache`, {
+          console.info(`[JobFill Choice] Tab ${tabId}: ${control.id} ✓ resolved from profile choice cache`, {
             selectedOptionIds: cached.selectedOptionIds,
             confidence: cached.confidence,
           });
           continue;
         }
-
-        aiRequests.push({ control, evidence });
+        uncachedCandidates.push(control);
       }
 
-      // 3. AI-First Resolution: Send all uncached controls to OpenRouter with full profile facts and Supermemory chunks
-      if (aiRequests.length) {
-        console.info(`[JobFill Choice] Tab ${tabId}: sending ${aiRequests.length} controls to OpenRouter AI resolver`, aiRequests.map(({ control }) => ({ id: control.id, question: control.question })));
-        const aiDecisions = await resolveChoicesWithAI(aiRequests);
-        console.info(`[JobFill Choice] Tab ${tabId}: OpenRouter resolved ${aiDecisions.length}/${aiRequests.length} controls`, aiDecisions.map((d) => ({ controlId: d.controlId, selectedOptionIds: d.selectedOptionIds, confidence: d.confidence })));
-        for (const decision of aiDecisions) {
-          const control = candidates.find((item) => item.id === decision.controlId);
+      // OpenRouter Call #1: Questions + Profile + Options
+      if (uncachedCandidates.length) {
+        const aiRequests1 = uncachedCandidates.map((control) => ({
+          control,
+          evidence: evidenceByControl.get(control.id)!,
+        }));
+        console.info(`[JobFill Choice] Tab ${tabId}: 🚀 OpenRouter Call #1 (Questions + Profile + Options) for ${aiRequests1.length} controls (no Supermemory)`, aiRequests1.map(({ control }) => ({ id: control.id, question: control.question })));
+        const aiDecisions1 = await resolveChoicesWithAI(aiRequests1, { stage: 'call1' });
+        console.info(`[JobFill Choice] Tab ${tabId}: OpenRouter Call #1 resolved ${aiDecisions1.length}/${aiRequests1.length} controls`, aiDecisions1.map((d) => ({ controlId: d.controlId, selectedOptionIds: d.selectedOptionIds, confidence: d.confidence })));
+
+        for (const decision of aiDecisions1) {
+          const control = uncachedCandidates.find((item) => item.id === decision.controlId);
           const evidence = evidenceByControl.get(decision.controlId);
           if (control && evidence) await cacheChoice(control, evidence, decision);
           decisions.push(decision);
         }
+
+        // Store Call #1 decisions in progress state
+        const decisionsById = new Map(progress.decisions.map((decision) => [decision.controlId, decision]));
+        for (const decision of decisions) decisionsById.set(decision.controlId, decision);
+        progress.decisions = [...decisionsById.values()];
+        progress.resolvedControlIds = [...new Set([...resolvedIds, ...decisions.map((decision) => decision.controlId)])];
+        progress.appliedControlIds = [...appliedIds];
+        await saveChoiceProgress(tabId, progress);
+
+        // ⚡ SELECT OPTIONS IMMEDIATELY FOR RESOLVED QUESTIONS — DON'T WAIT FOR CALL #2!
+        if (userWantsApply && aiDecisions1.length > 0) {
+          console.info(`[JobFill Choice] Tab ${tabId}: ⚡ Call #1 resolved ${aiDecisions1.length} options — selecting immediately on DOM without waiting for Call #2!`);
+          progress.applyRequested = true;
+          await applyPreparedChoiceDecisions(tabId, frameId, progress);
+        }
       }
 
-      // 4. Fallback for any controls not resolved by AI (e.g. offline, rate-limited, or placeholder key)
-      const decisionIds = new Set(decisions.map((d) => d.controlId));
-      for (const control of candidates) {
-        if (decisionIds.has(control.id)) continue;
-        const evidence = evidenceByControl.get(control.id);
-        if (!evidence) continue;
+      // =========================================================================
+      // STAGE 2: Supermemory Retrieval ONLY for Unresolved Questions
+      // =========================================================================
+      const resolvedIdsSet = new Set(decisions.map((d) => d.controlId));
+      const unresolvedCandidates = candidates.filter((control) => !resolvedIdsSet.has(control.id));
 
-        // Fallback 1: Profile-based heuristic
-        const profileDecision = profile ? resolveChoiceFromProfile(control, profile) : null;
-        if (profileDecision && profileDecision.confidence >= 0.9) {
-          decisions.push(profileDecision);
-          await cacheChoice(control, evidence, profileDecision);
-          decisionIds.add(control.id);
-          console.info(`[JobFill Choice] Tab ${tabId}: ${control.id} ✓ fallback resolved from profile`, { selectedOptionIds: profileDecision.selectedOptionIds });
-          continue;
+      if (unresolvedCandidates.length === 0) {
+        console.info(`[JobFill Choice] Tab ${tabId}: ✨ All ${candidates.length} controls resolved in Call #1 / cache! Skipped Supermemory entirely.`);
+      } else {
+        console.info(`[JobFill Choice] Tab ${tabId}: 🔍 ${unresolvedCandidates.length}/${candidates.length} controls unresolved after Call #1. Proceeding to Supermemory Retrieval for remaining questions:`, unresolvedCandidates.map((c) => ({ id: c.id, q: c.question })));
+
+        // Retrieve Supermemory memories ONLY for the unresolved questions
+        const memoryResults = await Promise.all(unresolvedCandidates.map(async (control) => {
+          if (!userId) return { control, matches: [] as string[], query: control.question.trim() };
+          const optionLabels = control.options
+            .filter((opt) => !opt.disabled && opt.label.trim())
+            .map((opt) => opt.label.trim())
+            .slice(0, 10);
+          const optionsContext = optionLabels.length > 0 ? ` (Options: ${optionLabels.join(', ')})` : '';
+          const query = `${control.question.trim()}${optionsContext}`;
+          const matches = await searchMemory(userId, query);
+          return { control, matches, query };
+        }));
+
+        const memoryByControlId = new Map(memoryResults.map(({ control, matches }) => [control.id, matches]));
+        console.info(`[JobFill Choice] Tab ${tabId}: Supermemory output for ${unresolvedCandidates.length} unresolved questions:`, memoryResults.map(({ control, matches, query }) => ({
+          controlId: control.id,
+          question: control.question,
+          querySentToSupermemory: query,
+          matchCount: matches.length,
+          outputFromSupermemory: matches,
+        })));
+
+        // =========================================================================
+        // STAGE 3: OpenRouter Call #2 (Remaining Questions + Profile + Memories + Options)
+        // =========================================================================
+        const aiRequests2: Array<{ control: ChoiceControl; evidence: ChoiceEvidence }> = [];
+        for (const control of unresolvedCandidates) {
+          const profileFacts = profile ? getRelevantProfileFacts(profile, control.question) : [];
+          const relevantFormAnswers = getRelevantChoiceFormAnswers(
+            control,
+            formAnswers.map(({ question, answer }) => `${question}: ${answer}`),
+          );
+          const memories = (memoryByControlId.get(control.id) ?? []).slice(0, 5);
+          const evidence: ChoiceEvidence = { profileFacts, memories, formAnswers: relevantFormAnswers };
+          evidenceByControl.set(control.id, evidence);
+
+          const cached = await getCachedChoice(control, evidence);
+          if (cached) {
+            decisions.push(cached);
+            console.info(`[JobFill Choice] Tab ${tabId}: ${control.id} ✓ resolved from memory choice cache`, {
+              selectedOptionIds: cached.selectedOptionIds,
+              confidence: cached.confidence,
+            });
+            continue;
+          }
+
+          aiRequests2.push({ control, evidence });
         }
 
-        // Fallback 2: Optimistic job availability / screening
-        const screeningDecision = resolveOptimisticJobAvailability(control, [
-          ...evidence.profileFacts,
-          ...evidence.memories,
-          ...evidence.formAnswers,
-        ]);
-        if (screeningDecision && screeningDecision.confidence >= 0.85) {
-          decisions.push(screeningDecision);
-          await cacheChoice(control, evidence, screeningDecision);
-          decisionIds.add(control.id);
-          console.info(`[JobFill Choice] Tab ${tabId}: ${control.id} ✓ fallback resolved via optimistic screening`, { selectedOptionIds: screeningDecision.selectedOptionIds });
-          continue;
+        if (aiRequests2.length) {
+          console.info(`[JobFill Choice] Tab ${tabId}: 🚀 OpenRouter Call #2 (Remaining Questions + Profile + Memories + Options) for ${aiRequests2.length} controls`, aiRequests2.map(({ control }) => ({ id: control.id, question: control.question })));
+          const aiDecisions2 = await resolveChoicesWithAI(aiRequests2, { stage: 'call2' });
+          console.info(`[JobFill Choice] Tab ${tabId}: OpenRouter Call #2 resolved ${aiDecisions2.length}/${aiRequests2.length} controls`, aiDecisions2.map((d) => ({ controlId: d.controlId, selectedOptionIds: d.selectedOptionIds, confidence: d.confidence })));
+          for (const decision of aiDecisions2) {
+            const control = unresolvedCandidates.find((item) => item.id === decision.controlId);
+            const evidence = evidenceByControl.get(decision.controlId);
+            if (control && evidence) await cacheChoice(control, evidence, decision);
+            decisions.push(decision);
+          }
         }
 
-        // Fallback 3: Memory / Form evidence heuristic
-        const evidenceDecision = resolveChoiceFromEvidence(control, [...evidence.memories, ...evidence.formAnswers]);
-        if (evidenceDecision && evidenceDecision.confidence >= 0.85) {
-          decisions.push(evidenceDecision);
-          await cacheChoice(control, evidence, evidenceDecision);
-          decisionIds.add(control.id);
-          console.info(`[JobFill Choice] Tab ${tabId}: ${control.id} ✓ fallback resolved from evidence`, { selectedOptionIds: evidenceDecision.selectedOptionIds });
-          continue;
+        // Fallbacks for any controls still unresolved after Call #2
+        const finalDecisionIds = new Set(decisions.map((d) => d.controlId));
+        for (const control of unresolvedCandidates) {
+          if (finalDecisionIds.has(control.id)) continue;
+          const evidence = evidenceByControl.get(control.id);
+          if (!evidence) continue;
+
+          // Fallback 1: Profile-based heuristic
+          const profileDecision = profile ? resolveChoiceFromProfile(control, profile) : null;
+          if (profileDecision && profileDecision.confidence >= 0.9) {
+            decisions.push(profileDecision);
+            await cacheChoice(control, evidence, profileDecision);
+            finalDecisionIds.add(control.id);
+            console.info(`[JobFill Choice] Tab ${tabId}: ${control.id} ✓ fallback resolved from profile`, { selectedOptionIds: profileDecision.selectedOptionIds });
+            continue;
+          }
+
+          // Fallback 2: Optimistic job availability / screening
+          const screeningDecision = resolveOptimisticJobAvailability(control, [
+            ...evidence.profileFacts,
+            ...evidence.memories,
+            ...evidence.formAnswers,
+          ]);
+          if (screeningDecision && screeningDecision.confidence >= 0.85) {
+            decisions.push(screeningDecision);
+            await cacheChoice(control, evidence, screeningDecision);
+            finalDecisionIds.add(control.id);
+            console.info(`[JobFill Choice] Tab ${tabId}: ${control.id} ✓ fallback resolved via optimistic screening`, { selectedOptionIds: screeningDecision.selectedOptionIds });
+            continue;
+          }
+
+          // Fallback 3: Memory / Form evidence heuristic
+          const evidenceDecision = resolveChoiceFromEvidence(control, [...evidence.memories, ...evidence.formAnswers]);
+          if (evidenceDecision && evidenceDecision.confidence >= 0.85) {
+            decisions.push(evidenceDecision);
+            await cacheChoice(control, evidence, evidenceDecision);
+            finalDecisionIds.add(control.id);
+            console.info(`[JobFill Choice] Tab ${tabId}: ${control.id} ✓ fallback resolved from evidence`, { selectedOptionIds: evidenceDecision.selectedOptionIds });
+            continue;
+          }
+
+          console.warn(`[JobFill Choice] Tab ${tabId}: ${control.id} could not be resolved by AI (Call #1, Call #2) or fallbacks`, { question: control.question });
         }
 
-        console.warn(`[JobFill Choice] Tab ${tabId}: ${control.id} could not be resolved by AI or fallbacks`, { question: control.question });
+        // Store all combined decisions in progress state
+        const decisionsById = new Map(progress.decisions.map((decision) => [decision.controlId, decision]));
+        for (const decision of decisions) decisionsById.set(decision.controlId, decision);
+        progress.decisions = [...decisionsById.values()];
+        progress.resolvedControlIds = [...new Set([...resolvedIds, ...decisions.map((decision) => decision.controlId)])];
+        await saveChoiceProgress(tabId, progress);
+
+        // Apply any newly resolved choices from Call #2 or fallbacks
+        if (userWantsApply) {
+          const unapplied = progress.decisions.filter((d) => !progress.appliedControlIds.includes(d.controlId));
+          if (unapplied.length > 0) {
+            console.info(`[JobFill Choice] Tab ${tabId}: ▶ Call #2 complete — applying ${unapplied.length} remaining decisions to DOM`);
+            progress.applyRequested = true;
+            await applyPreparedChoiceDecisions(tabId, frameId, progress);
+          }
+        }
       }
 
-      const decisionsById = new Map(progress.decisions.map((decision) => [decision.controlId, decision]));
-      for (const decision of decisions) decisionsById.set(decision.controlId, decision);
-      progress.decisions = [...decisionsById.values()];
-      progress.resolvedControlIds = [...new Set([...resolvedIds, ...decisions.map((decision) => decision.controlId)])];
-      progress.appliedControlIds = [...appliedIds];
-      await saveChoiceProgress(tabId, progress);
-      console.info(`[JobFill Choice] Tab ${tabId}: ✅ prepared and stored ${decisions.length} decisions`, {
-        decisions: decisions.map((d) => ({ controlId: d.controlId, source: d.source, confidence: d.confidence, selectedOptionIds: d.selectedOptionIds })),
+      console.info(`[JobFill Choice] Tab ${tabId}: ✅ prepared and stored ${decisions.length} total decisions`, {
+        decisions: decisions.map((d) => {
+          const control = controls.find((c) => c.id === d.controlId);
+          const selectedLabels = control?.options.filter((o) => d.selectedOptionIds.includes(o.id)).map((o) => o.label) ?? [];
+          return {
+            controlId: d.controlId,
+            question: control?.question,
+            selectedOptionIds: d.selectedOptionIds,
+            selectedLabels,
+            source: d.source,
+            confidence: d.confidence,
+            otherText: d.otherText,
+          };
+        }),
       });
     } else {
       progress.resolvedControlIds = [...resolvedIds];
@@ -636,7 +829,6 @@ async function runChoicePipeline(tabId: number, frameId: number, url: string): P
     }
 
     if (progress.applyRequested || choiceApplyRequestedTabs.has(tabId)) {
-      console.info(`[JobFill Choice] Tab ${tabId}: ▶ applying decisions (applyRequested=${progress.applyRequested})`);
       progress.applyRequested = true;
       await applyPreparedChoiceDecisions(tabId, frameId, progress);
       choiceApplyRequestedTabs.delete(tabId);
@@ -647,6 +839,7 @@ async function runChoicePipeline(tabId: number, frameId: number, url: string): P
     console.warn(`[JobFill Choice] Tab ${tabId}: ❌ radio/checkbox pipeline failed`, error);
   } finally {
     runningChoiceTabs.delete(tabId);
+    choiceApplyRequestedTabs.delete(tabId);
     if (pendingChoiceApplyTabs.delete(tabId)) {
       const progress = choiceProgressByTab.get(tabId);
       if (progress?.applyRequested) {
@@ -654,6 +847,115 @@ async function runChoicePipeline(tabId: number, frameId: number, url: string): P
           console.warn(`[JobFill Choice] Tab ${tabId}: queued radio/checkbox apply failed`, error);
         });
       }
+    }
+  }
+}
+
+// ============================================================
+// Dropdown Pipeline (4th pipeline — native <select>, Google Forms, ARIA)
+// ============================================================
+const runningDropdownTabs = new Set<number>();
+
+async function runDropdownPipeline(tabId: number, frameId: number): Promise<void> {
+  const now = Date.now();
+  const lastRunAt = lastDropdownPipelineAtByTab.get(tabId) ?? 0;
+  if (runningDropdownTabs.has(tabId) || shouldSkipDuplicateScan(lastRunAt, now, 3000)) {
+    console.info(`[JobFill Dropdown] Tab ${tabId}: pipeline already running or recently scanned, skipping`);
+    return;
+  }
+  lastDropdownPipelineAtByTab.set(tabId, now);
+  runningDropdownTabs.add(tabId);
+  console.info(`[JobFill Dropdown] Tab ${tabId}: ▶ starting dropdown pipeline (frame ${frameId})`);
+  let isWorkday = false;
+  let detectedCount = 0;
+  const filledControlIds = new Set<string>();
+
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    isWorkday = tab.url?.includes('myworkdayjobs.com') ?? false;
+
+    const mappingDeadline = Date.now() + 60000;
+    let tabResult = await getTabResult(tabId);
+    if (tabResult?.status === 'running') {
+      console.info(`[JobFill Dropdown] Tab ${tabId}: waiting for pre-scan mapping to finish before scanning dropdowns`);
+    }
+    while (tabResult?.status === 'running' && Date.now() < mappingDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      tabResult = await getTabResult(tabId);
+    }
+    if (tabResult?.status === 'running') {
+      console.warn(`[JobFill Dropdown] Tab ${tabId}: mapping is still running after 60 seconds; skipping dropdown scan`);
+      return;
+    }
+
+    // 1. Scan all dropdowns on the page
+    const scanResponse = await chrome.tabs.sendMessage(
+      tabId,
+      { type: 'DROPDOWN_SCAN' },
+      { frameId },
+    ) as { controls?: DropdownControl[] };
+    const controls = scanResponse?.controls ?? [];
+    detectedCount = controls.length;
+    for (const control of controls) {
+      if (control.options.some((option) => option.selected && !isDropdownPlaceholder(option.label))) {
+        filledControlIds.add(control.id);
+      }
+    }
+    console.info(`[JobFill Dropdown] Tab ${tabId}: DROPDOWN_SCAN returned ${controls.length} dropdown controls`);
+
+    if (!controls.length) {
+      console.info(`[JobFill Dropdown] Tab ${tabId}: no dropdowns found, pipeline complete`);
+      return;
+    }
+
+    // 2. Load profile
+    let profile: UserProfile | undefined;
+    try {
+      profile = await cloudGetProfile();
+    } catch (error) {
+      console.warn(`[JobFill Dropdown] Tab ${tabId}: profile unavailable`, error);
+    }
+
+    // 3. Resolve configured presets even when profile loading fails.
+    const decisions = await resolveDropdownsWithAI(controls, profile);
+    console.info(`[JobFill Dropdown] Tab ${tabId}: LLM resolved ${decisions.length}/${controls.length} dropdowns`, decisions.map((d) => ({
+      controlId: d.controlId,
+      selectedLabel: d.selectedLabel,
+      selectedIndex: d.selectedIndex,
+      confidence: d.confidence,
+    })));
+
+    if (!decisions.length) {
+      console.info(`[JobFill Dropdown] Tab ${tabId}: no dropdown decisions to apply`);
+      return;
+    }
+
+    // 4. Apply decisions to the DOM
+    const result = await chrome.tabs.sendMessage(
+      tabId,
+      { type: 'DROPDOWN_APPLY', decisions },
+      { frameId },
+    ) as { applied?: string[]; unresolved?: string[] };
+    for (const controlId of result?.applied ?? []) filledControlIds.add(controlId);
+
+    console.info(`[JobFill Dropdown] Tab ${tabId}: ✅ dropdown apply result`, {
+      applied: result?.applied ?? [],
+      unresolved: result?.unresolved ?? [],
+    });
+  } catch (error) {
+    console.warn(`[JobFill Dropdown] Tab ${tabId}: ❌ dropdown pipeline failed`, error);
+  } finally {
+    runningDropdownTabs.delete(tabId);
+    if (isWorkday) {
+      void chrome.runtime.sendMessage({
+        type: 'DROPDOWN_PIPELINE_RESULT',
+        tabId,
+        detectedCount,
+        filledCount: filledControlIds.size,
+        unresolvedCount: Math.max(0, detectedCount - filledControlIds.size),
+      }).catch((error) => {
+        console.warn(`[JobFill Dropdown] Tab ${tabId}: could not update popup counts`, error);
+      });
     }
   }
 }
@@ -867,10 +1169,13 @@ async function fillLateProfileMappings(tabId: number, frameId: number): Promise<
  * Errors are caught and stored as status:'error' — never crash the service worker.
  */
 async function runPrescanPipeline(tabId: number, googleFormsFrameId?: number): Promise<void> {
-  if (runningTabs.has(tabId)) {
+  const now = Date.now();
+  const lastRunAt = lastPrescanAtByTab.get(tabId) ?? 0;
+  if (runningTabs.has(tabId) || shouldSkipDuplicateScan(lastRunAt, now, 2500)) {
     pendingPrescanTabs.add(tabId);
     return;
   }
+  lastPrescanAtByTab.set(tabId, now);
   runningTabs.add(tabId);
 
   try {
@@ -948,6 +1253,19 @@ async function runPrescanPipeline(tabId: number, googleFormsFrameId?: number): P
 
     const { scanResult, sanitizedFields, selectorLookup, fingerprint } = prescanResp;
     const isGoogleForm = isGoogleFormsUrl(scanResult.url);
+    if (import.meta.env.DEV) {
+      console.info('[Pipeline 1/5] Form scan and local mapping', {
+        totalFields: scanResult.totalFields,
+        mappedLocally: scanResult.fields.filter((field) => field.category === 'SAFE_AUTO').length,
+        needsAIOrReview: scanResult.fields.filter((field) => field.category === 'UNKNOWN' || field.category === 'APPLICATION_QUESTION').length,
+        fields: scanResult.fields.map((field) => ({
+          label: field.attributes.labelText || field.attributes.ariaLabel || field.attributes.placeholder || field.attributes.name || '(unlabeled)',
+          category: field.category,
+          profileField: field.profileField,
+          confidence: field.confidence,
+        })),
+      });
+    }
 
     if (isGoogleForm) await clearQuestionState(tabId);
     else await runQuestionPipeline(tabId, frameId, scanResult.url, scanResult.fields);
@@ -1065,6 +1383,17 @@ async function runPrescanPipeline(tabId: number, googleFormsFrameId?: number): P
           }
 
           aiMappedCount = aiMappings.length;
+          if (import.meta.env.DEV) {
+            console.info('[Pipeline 1/5] AI intent mapped to local profile fields', aiMappings.map((mapping) => {
+              const field = scanResult.fields.find((item) => item.selector === mapping.selector);
+              return {
+                label: field?.attributes.labelText || field?.attributes.ariaLabel || '(unlabeled)',
+                profileField: mapping.profileField,
+                valueAvailable: Boolean(mapping.value.trim()),
+                confidence: mapping.confidence,
+              };
+            }));
+          }
 
           // --- Pipeline 2 dispatch: fire-and-forget for NO_PROFILE_MATCH Google Forms fields ---
           const aiMappedSelectors = new Set(aiMappings.map((m) => m.selector));
@@ -1107,6 +1436,9 @@ async function runPrescanPipeline(tabId: number, googleFormsFrameId?: number): P
 
             if (gfP2Tasks.length > 0) {
               console.log(`[JobFill BG] Tab ${tabId}: Google Forms Pipeline 1 → NO_PROFILE_MATCH for ${gfP2Tasks.length} fields; dispatching to Pipeline 2 (fire-and-forget)`);
+              if (import.meta.env.DEV) {
+                console.info('[Pipeline 2/5] Unmapped Google Forms fields queued for answer generation', gfP2Tasks.map(({ fieldId, question }) => ({ fieldId, question })));
+              }
               const isAutofillPending = (pendingQuestionAutofillTabs.get(tabId) ?? false)
                 || Boolean(gfExistingState?.autofillRequested);
               void appendQuestionTasks(tabId, scanResult.url, frameId, gfP2Tasks, isAutofillPending)
@@ -1191,6 +1523,17 @@ async function runPrescanPipeline(tabId: number, googleFormsFrameId?: number): P
         aiMappedCount = aiMappings.length;
         scanResult.mappedFields = scanResult.fields.filter((f) => f.category === 'SAFE_AUTO').length;
         scanResult.unknownFields = scanResult.fields.filter((f) => f.category === 'UNKNOWN').length;
+        if (import.meta.env.DEV) {
+          console.info('[Pipeline 1/5] AI intent mapped to local profile fields', aiMappings.map((mapping) => {
+            const field = scanResult.fields.find((item) => item.selector === mapping.selector);
+            return {
+              label: field?.attributes.labelText || field?.attributes.ariaLabel || '(unlabeled)',
+              profileField: mapping.profileField,
+              valueAvailable: Boolean(mapping.value.trim()),
+              confidence: mapping.confidence,
+            };
+          }));
+        }
 
         // --- Pipeline 2 dispatch: fire-and-forget for NO_PROFILE_MATCH fields ---
         if (noProfileMatchCandidates.length > 0) {
@@ -1232,6 +1575,9 @@ async function runPrescanPipeline(tabId: number, googleFormsFrameId?: number): P
 
           if (p2Tasks.length > 0) {
             console.log(`[JobFill BG] Tab ${tabId}: Pipeline 1 → NO_PROFILE_MATCH for ${p2Tasks.length} fields; dispatching to Pipeline 2 (fire-and-forget)`);
+            if (import.meta.env.DEV) {
+              console.info('[Pipeline 2/5] Unmapped fields queued for answer generation', p2Tasks.map(({ fieldId, question }) => ({ fieldId, question })));
+            }
             void appendQuestionTasks(tabId, scanResult.url, frameId, p2Tasks)
               .then(() => processQuestionTasks(tabId, p2Tasks));
           }
@@ -1291,6 +1637,7 @@ export default defineBackground(() => {
   // Clear cached result when user navigates away (new URL = new form)
   chrome.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
     if (changeInfo.status === 'loading') {
+      pendingQuestionAutofillTabs.delete(tabId);
       await clearTabResult(tabId);
       await clearQuestionState(tabId);
       await clearFileUploadState(tabId);
@@ -1325,6 +1672,17 @@ export default defineBackground(() => {
     if (message.type === 'TRIGGER_CHOICE_AUTOFILL') {
       const tabId = message.tabId;
       if (Number.isInteger(tabId)) void requestChoiceApply(tabId);
+      return false;
+    }
+
+    if (message.type === 'TRIGGER_DROPDOWN_AUTOFILL') {
+      const tabId = message.tabId;
+      if (Number.isInteger(tabId)) {
+        void (async () => {
+          const frameId = await findGoogleFormsFrameId(tabId) ?? 0;
+          void runDropdownPipeline(tabId, frameId);
+        })();
+      }
       return false;
     }
 
@@ -1363,6 +1721,12 @@ export default defineBackground(() => {
     if (message.type === 'FORM_STRUCTURE_CHANGED') {
       const tabId = sender.tab?.id;
       if (tabId == null || sender.frameId !== 0) return false;
+
+      const now = Date.now();
+      const lastChange = lastPrescanAtByTab.get(tabId) ?? 0;
+      if (shouldSkipDuplicateScan(lastChange, now, 2500)) {
+        return false;
+      }
 
       void Promise.all([clearTabResult(tabId), clearQuestionState(tabId), clearFileUploadState(tabId), clearChoiceProgress(tabId)]).then(async () => {
         await chrome.runtime.sendMessage({ type: 'FORM_STRUCTURE_UPDATED', tabId }).catch((err) => {
