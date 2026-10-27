@@ -61,12 +61,19 @@ export function isDropdownPlaceholder(label: string): boolean {
   return /^(?:choose(?: one)?|select(?: one)?|please select|select\.\.\.|no items(?: available)?|no results(?: found)?|loading(?:\.\.\.)?|--|\s*)$/i.test(normalizeText(label));
 }
 
-function makeDropdownControlId(kind: DropdownControl['kind'], question: string, options: DropdownOption[], selector: string): string {
+function makeDropdownControlId(
+  kind: DropdownControl['kind'],
+  question: string,
+  options: DropdownOption[],
+  selector: string,
+  lazy = false,
+): string {
   const signature = JSON.stringify({
     kind,
     selector,
     question: normalizeText(question).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim(),
-    options: options.map((option) => [normalizeText(option.label).toLowerCase(), option.value, option.disabled]),
+    // Lazy controls have no options yet; their ID must not change once probed, so options are left out.
+    options: lazy ? [] : options.map((option) => [normalizeText(option.label).toLowerCase(), option.value, option.disabled]),
   });
   return `dropdown_${kind}_${hash(signature)}`;
 }
@@ -517,7 +524,7 @@ function getBooleanFallbackOptions(question: string): DropdownOption[] {
 /**
  * Scan React-Select, Greenhouse comboboxes, and standard ARIA comboboxes.
  */
-async function scanReactSelectAndComboboxDropdowns(existingSelectors: Set<string>): Promise<DropdownControl[]> {
+async function scanReactSelectAndComboboxDropdowns(existingSelectors: Set<string>, lazy = false): Promise<DropdownControl[]> {
   const controls: DropdownControl[] = [];
 
   const candidates = queryAcrossOpenShadowRoots<HTMLElement>(
@@ -555,6 +562,20 @@ async function scanReactSelectAndComboboxDropdowns(existingSelectors: Set<string
     // often lives outside the field DOM and the global country list can otherwise win.
     let options = findScopedOptions(container, reactSelectId);
 
+    // Lazy scan: do not open the dropdown. Options are probed later, only if something needs them.
+    if (!options.length && lazy) {
+      controls.push({
+        id: makeDropdownControlId('combobox', question, [], selector, true),
+        kind: 'combobox',
+        selector,
+        question,
+        options: [],
+        optionsLoaded: false,
+        currentValue: readComboboxCurrentValue(container),
+      });
+      continue;
+    }
+
     if (!options.length) {
       options = await probeComboboxOptions(inputEl, container);
     }
@@ -572,16 +593,43 @@ async function scanReactSelectAndComboboxDropdowns(existingSelectors: Set<string
       selector,
       question,
       options,
+      currentValue: readComboboxCurrentValue(container),
     });
   }
 
   return controls;
 }
 
+/** Text shown by a React-Select/combobox without opening it ("" when nothing is selected). */
+function readComboboxCurrentValue(container: HTMLElement): string {
+  return normalizeText(container.querySelector<HTMLElement>(
+    '.select__single-value, [class*="-singleValue"], .iti__selected-country',
+  )?.textContent);
+}
+
+/**
+ * Open the given comboboxes once, read their options and close them.
+ * Used only for controls whose options a rule or the AI actually needs.
+ */
+export async function probeDropdownOptions(selectors: string[]): Promise<Array<{ selector: string; options: DropdownOption[] }>> {
+  const results: Array<{ selector: string; options: DropdownOption[] }> = [];
+  for (const selector of selectors) {
+    const inputEl = getElementBySelector(selector) as HTMLElement | null;
+    const container = inputEl ? getDropdownContainer(inputEl) : null;
+    if (!inputEl || !container) continue;
+    const reactSelectId = inputEl.id ? `react-select-${inputEl.id}` : '';
+    let options = findScopedOptions(container, reactSelectId);
+    if (!options.length) options = await probeComboboxOptions(inputEl, container);
+    if (!options.length) options = getBooleanFallbackOptions(questionForDropdown(inputEl, container));
+    results.push({ selector, options });
+  }
+  return results;
+}
+
 /**
  * Main scan function: detect all dropdowns (native <select>, Google Forms, React-Select / ARIA comboboxes).
  */
-async function scanDropdownControlsCore(): Promise<DropdownControl[]> {
+async function scanDropdownControlsCore(lazy = false): Promise<DropdownControl[]> {
   const controls: DropdownControl[] = [];
 
   // 1. Native <select>
@@ -592,7 +640,7 @@ async function scanDropdownControlsCore(): Promise<DropdownControl[]> {
 
   // 3. React-Select and ARIA comboboxes
   const existingSelectors = new Set(controls.map((c) => c.selector));
-  const comboboxes = await scanReactSelectAndComboboxDropdowns(existingSelectors);
+  const comboboxes = await scanReactSelectAndComboboxDropdowns(existingSelectors, lazy);
   controls.push(...comboboxes);
 
   console.info(`[JobFill Dropdown] DOM scan detected ${controls.length} dropdown controls`, controls.map((c) => ({
@@ -606,8 +654,8 @@ async function scanDropdownControlsCore(): Promise<DropdownControl[]> {
   return controls;
 }
 
-export function scanDropdownControls(): Promise<DropdownControl[]> {
-  return preservePageScroll(document.documentElement, scanDropdownControlsCore);
+export function scanDropdownControls(lazy = false): Promise<DropdownControl[]> {
+  return preservePageScroll(document.documentElement, () => scanDropdownControlsCore(lazy));
 }
 
 /**
@@ -723,13 +771,17 @@ async function applySingleDropdownCore(decision: DropdownDecision): Promise<bool
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
 
-    // Step B: Locate the option in the opened flyout (strictly scoped)
-    const optionElements = findScopedOptions(container ?? control, reactSelectId);
-
-    const targetOption = optionElements.find((opt) =>
+    // Step B: Locate the option in the opened flyout (strictly scoped).
+    // Options can mount late (Workday), so poll briefly instead of one fixed wait.
+    const findTarget = () => findScopedOptions(container ?? control, reactSelectId).find((opt) =>
       normalizeText(opt.label).toLowerCase() === decision.selectedLabel.toLowerCase()
       || normalizeText(opt.value).toLowerCase() === decision.selectedLabel.toLowerCase(),
     );
+    let targetOption = findTarget();
+    for (let attempt = 0; !targetOption && attempt < 8; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 75));
+      targetOption = findTarget();
+    }
 
     // Step C: Click the option
     let selectionAttempted = false;

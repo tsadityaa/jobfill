@@ -15,6 +15,10 @@ export interface DropdownControl {
   selector: string;
   question: string;
   options: DropdownOption[];
+  /** false when a lazy scan did not open the dropdown, so `options` is empty until probed. Missing means loaded. */
+  optionsLoaded?: boolean;
+  /** Text currently shown by the dropdown, when readable without opening it. */
+  currentValue?: string;
 }
 
 export interface DropdownDecision {
@@ -29,6 +33,18 @@ export interface DropdownDecision {
 
 export interface DropdownScanRequest {
   type: 'DROPDOWN_SCAN';
+  /** Do not open dropdowns to read their options; report them with optionsLoaded=false. */
+  lazy?: boolean;
+}
+
+export interface DropdownProbeRequest {
+  type: 'DROPDOWN_PROBE';
+  selectors: string[];
+}
+
+export interface DropdownProbeResponse {
+  type: 'DROPDOWN_PROBE_RESULT';
+  results: Array<{ selector: string; options: DropdownOption[] }>;
 }
 
 export interface DropdownScanResponse {

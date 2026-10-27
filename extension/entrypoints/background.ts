@@ -50,8 +50,8 @@ import type { QuestionTask } from '../types/questionTask';
 import type { FileUploadTask } from '../types/fileUploadTask';
 import type { StoredDocument } from '../types/document';
 import type { ChoiceControl, ChoiceDecision, ChoiceEvidence } from '../types/choice';
-import type { DropdownControl, DropdownDecision } from '../types/dropdown';
-import { resolveDropdownsWithAI } from '../utils/dropdownResolver';
+import type { DropdownControl, DropdownDecision, DropdownOption } from '../types/dropdown';
+import { resolveDropdownAI, resolveDropdownRules } from '../utils/dropdownResolver';
 import { isDropdownPlaceholder } from '../utils/dropdownControls';
 import { shouldSkipDuplicateScan } from '../utils/scanCoalescer';
 import type { UserProfile } from '../types/profile';
@@ -888,18 +888,19 @@ async function runDropdownPipeline(tabId: number, frameId: number): Promise<void
       return;
     }
 
-    // 1. Scan all dropdowns on the page
+    // 1. Light scan: read questions and any free options, but do not open dropdowns yet.
     const scanResponse = await chrome.tabs.sendMessage(
       tabId,
-      { type: 'DROPDOWN_SCAN' },
+      { type: 'DROPDOWN_SCAN', lazy: true },
       { frameId },
     ) as { controls?: DropdownControl[] };
     const controls = scanResponse?.controls ?? [];
     detectedCount = controls.length;
     for (const control of controls) {
-      if (control.options.some((option) => option.selected && !isDropdownPlaceholder(option.label))) {
-        filledControlIds.add(control.id);
-      }
+      const hasSelection = control.optionsLoaded === false
+        ? Boolean(control.currentValue) && !isDropdownPlaceholder(control.currentValue ?? '')
+        : control.options.some((option) => option.selected && !isDropdownPlaceholder(option.label));
+      if (hasSelection) filledControlIds.add(control.id);
     }
     console.info(`[JobFill Dropdown] Tab ${tabId}: DROPDOWN_SCAN returned ${controls.length} dropdown controls`);
 
@@ -916,32 +917,67 @@ async function runDropdownPipeline(tabId: number, frameId: number): Promise<void
       console.warn(`[JobFill Dropdown] Tab ${tabId}: profile unavailable`, error);
     }
 
-    // 3. Resolve configured presets even when profile loading fails.
-    const decisions = await resolveDropdownsWithAI(controls, profile);
-    console.info(`[JobFill Dropdown] Tab ${tabId}: LLM resolved ${decisions.length}/${controls.length} dropdowns`, decisions.map((d) => ({
+    const applyDecisions = async (decisions: DropdownDecision[]): Promise<void> => {
+      if (!decisions.length) return;
+      const result = await chrome.tabs.sendMessage(
+        tabId,
+        { type: 'DROPDOWN_APPLY', decisions },
+        { frameId },
+      ) as { applied?: string[]; unresolved?: string[] };
+      for (const controlId of result?.applied ?? []) filledControlIds.add(controlId);
+      console.info(`[JobFill Dropdown] Tab ${tabId}: ✅ dropdown apply result`, {
+        applied: result?.applied ?? [],
+        unresolved: result?.unresolved ?? [],
+      });
+    };
+    // A failed AI request must never block the rule-based dropdowns.
+    const startAI = (candidates: DropdownControl[]): Promise<DropdownDecision[]> =>
+      profile && candidates.length
+        ? resolveDropdownAI(candidates, profile).catch((error) => {
+          console.warn(`[JobFill Dropdown] Tab ${tabId}: AI dropdown resolution failed`, error);
+          return [];
+        })
+        : Promise.resolve([]);
+
+    // 3. Rules first (no AI, nothing opened). The batched AI request for dropdowns that already
+    //    expose their options starts now and runs while the page is being filled.
+    const rules = await resolveDropdownRules(controls, profile);
+    console.info(`[JobFill Dropdown] Tab ${tabId}: rules answered ${rules.decisions.length}/${controls.length}`, {
+      needsProbe: rules.needsProbe.length,
+      aiCandidates: rules.aiCandidates.length,
+    });
+    const firstAI = startAI(rules.aiCandidates);
+
+    // 4. Fill the rule-based dropdowns (each is opened once).
+    await applyDecisions(rules.decisions);
+
+    // 5. Open only the dropdowns whose options a rule or the AI still needs, once each.
+    let secondAI: Promise<DropdownDecision[]> = Promise.resolve([]);
+    if (rules.needsProbe.length) {
+      const probe = await chrome.tabs.sendMessage(
+        tabId,
+        { type: 'DROPDOWN_PROBE', selectors: rules.needsProbe.map((control) => control.selector) },
+        { frameId },
+      ) as { results?: Array<{ selector: string; options: DropdownOption[] }> };
+      const optionsBySelector = new Map((probe?.results ?? []).map((entry) => [entry.selector, entry.options]));
+      const probed = rules.needsProbe.flatMap((control) => {
+        const options = optionsBySelector.get(control.selector);
+        return options?.length ? [{ ...control, options, optionsLoaded: true }] : [];
+      });
+      const second = await resolveDropdownRules(probed, profile);
+      secondAI = startAI(second.aiCandidates);
+      await applyDecisions(second.decisions);
+    }
+
+    // 6. Apply the AI answers once they arrive.
+    const aiDecisions = [...await firstAI, ...await secondAI];
+    console.info(`[JobFill Dropdown] Tab ${tabId}: LLM resolved ${aiDecisions.length} dropdowns`, aiDecisions.map((d) => ({
       controlId: d.controlId,
       selectedLabel: d.selectedLabel,
       selectedIndex: d.selectedIndex,
       confidence: d.confidence,
     })));
-
-    if (!decisions.length) {
-      console.info(`[JobFill Dropdown] Tab ${tabId}: no dropdown decisions to apply`);
-      return;
-    }
-
-    // 4. Apply decisions to the DOM
-    const result = await chrome.tabs.sendMessage(
-      tabId,
-      { type: 'DROPDOWN_APPLY', decisions },
-      { frameId },
-    ) as { applied?: string[]; unresolved?: string[] };
-    for (const controlId of result?.applied ?? []) filledControlIds.add(controlId);
-
-    console.info(`[JobFill Dropdown] Tab ${tabId}: ✅ dropdown apply result`, {
-      applied: result?.applied ?? [],
-      unresolved: result?.unresolved ?? [],
-    });
+    await applyDecisions(aiDecisions);
   } catch (error) {
     console.warn(`[JobFill Dropdown] Tab ${tabId}: ❌ dropdown pipeline failed`, error);
   } finally {

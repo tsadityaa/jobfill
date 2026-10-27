@@ -379,7 +379,7 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
         if (tab.url?.includes('myworkdayjobs.com')) {
           const dropdownResponse = await chrome.tabs.sendMessage(
             tab.id,
-            { type: 'DROPDOWN_SCAN' },
+            { type: 'DROPDOWN_SCAN', lazy: true },
             { frameId: 0 },
           ).catch(() => null) as { controls?: unknown[] } | null;
 

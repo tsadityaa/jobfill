@@ -41,12 +41,17 @@ function normalizePresetText(value: string): string {
     .trim();
 }
 
-function getWorkdayPresetOption(control: DropdownControl): DropdownOption | undefined {
+/** Preset answer text for a question, without needing the option list. */
+function getWorkdayPresetAnswer(control: DropdownControl): string | undefined {
   const question = normalizePresetText(control.question);
-  const preset = WORKDAY_SCREENING_PRESETS.find((entry) => entry.question.test(question));
-  if (!preset) return undefined;
+  return WORKDAY_SCREENING_PRESETS.find((entry) => entry.question.test(question))?.answer;
+}
 
-  const expectedAnswer = normalizePresetText(preset.answer);
+function getWorkdayPresetOption(control: DropdownControl): DropdownOption | undefined {
+  const answer = getWorkdayPresetAnswer(control);
+  if (!answer) return undefined;
+
+  const expectedAnswer = normalizePresetText(answer);
   return control.options.find((option) =>
     !option.disabled && normalizePresetText(option.label) === expectedAnswer,
   );
@@ -165,35 +170,79 @@ function findEducationDegreeOption(control: DropdownControl, profile: UserProfil
     : undefined;
 }
 
-/** Resolve dropdowns using the same profile-first, indexed choice prompt as radios and checkboxes. */
-export async function resolveDropdownsWithAI(
+export interface DropdownRuleResult {
+  /** Ready to apply now (presets, degree, country code, cache hits). */
+  decisions: DropdownDecision[];
+  /** Lazy controls whose options a rule or the AI needs; open each once to read them, then call this again. */
+  needsProbe: DropdownControl[];
+  /** Controls with options loaded that no rule or cache could answer. These go to the AI in one batch. */
+  aiCandidates: DropdownControl[];
+}
+
+// Rules that compare against the option list, so a lazy control must be opened first.
+const RULE_NEEDS_OPTIONS = /\b(?:degree|country)\b/i;
+
+function makeDecision(control: DropdownControl, option: DropdownOption, source: 'profile' | 'ai', confidence = 1): DropdownDecision {
+  return {
+    controlId: control.id,
+    selector: control.selector,
+    selectedIndex: option.index,
+    selectedLabel: option.label,
+    confidence,
+    optionSelector: option.selector,
+    source,
+  };
+}
+
+/**
+ * Rule-based stage: no AI and, for lazy controls, no opening of the dropdown.
+ * Presets decide from the question text alone, so those dropdowns are opened exactly once (when applied).
+ */
+export async function resolveDropdownRules(
   controls: DropdownControl[],
   profile?: UserProfile,
-): Promise<DropdownDecision[]> {
-  if (!controls.length) return [];
+): Promise<DropdownRuleResult> {
+  const result: DropdownRuleResult = { decisions: [], needsProbe: [], aiCandidates: [] };
+  if (!controls.length) return result;
   const aiEnabled = await isDropdownAIEnabled();
 
   const profileFacts = profile ? getProfileFactsWithPhoneDialingCodes(profile) : [];
   const profileCountry = profile ? getPrimaryAddressCountry(profile) : '';
-  const decisions: DropdownDecision[] = [];
-  const candidates: Array<{ control: DropdownControl; choiceControl: ChoiceControl; evidence: ChoiceEvidence }> = [];
 
   for (const control of controls) {
+    // ---- Lazy control: options not read yet, decide from the question text where possible ----
+    if (control.optionsLoaded === false) {
+      const shown = control.currentValue && !isDropdownPlaceholder(control.currentValue) ? control.currentValue : '';
+      const presetAnswer = getWorkdayPresetAnswer(control);
+      if (presetAnswer) {
+        if (shown && normalizePresetText(shown) === normalizePresetText(presetAnswer)) continue;
+        result.decisions.push({
+          controlId: control.id,
+          selector: control.selector,
+          selectedIndex: -1, // matched by label when applied
+          selectedLabel: presetAnswer,
+          confidence: 1,
+          source: 'profile',
+        });
+        console.info(`[JobFill Dropdown] Applying configured Workday answer for "${control.question}": "${presetAnswer}" (no probe)`);
+        continue;
+      }
+      if (shown) {
+        console.info(`[JobFill Dropdown] Preserving existing non-placeholder selection for "${control.question}": "${shown}"`);
+        continue;
+      }
+      // Open it only if a rule or the AI would use the options.
+      if (profile && (RULE_NEEDS_OPTIONS.test(control.question) || aiEnabled)) result.needsProbe.push(control);
+      continue;
+    }
+
+    // ---- Loaded control ----
     const currentlySelected = control.options.find((option) => option.selected && !isDropdownPlaceholder(option.label));
 
     const workdayPresetOption = getWorkdayPresetOption(control);
     if (workdayPresetOption) {
       if (currentlySelected?.index === workdayPresetOption.index) continue;
-
-      decisions.push({
-        controlId: control.id,
-        selector: control.selector,
-        selectedIndex: workdayPresetOption.index,
-        selectedLabel: workdayPresetOption.label,
-        confidence: 1,
-        optionSelector: workdayPresetOption.selector,
-        source: 'profile',
-      });
+      result.decisions.push(makeDecision(control, workdayPresetOption, 'profile'));
       console.info(`[JobFill Dropdown] Applying configured Workday answer for "${control.question}": "${workdayPresetOption.label}"`);
       continue;
     }
@@ -201,33 +250,15 @@ export async function resolveDropdownsWithAI(
     const educationDegreeOption = profile ? findEducationDegreeOption(control, profile) : undefined;
     if (educationDegreeOption) {
       if (currentlySelected?.index === educationDegreeOption.index) continue;
-
-      decisions.push({
-        controlId: control.id,
-        selector: control.selector,
-        selectedIndex: educationDegreeOption.index,
-        selectedLabel: educationDegreeOption.label,
-        confidence: 1,
-        optionSelector: educationDegreeOption.selector,
-        source: 'profile',
-      });
+      result.decisions.push(makeDecision(control, educationDegreeOption, 'profile'));
       continue;
     }
 
     const profileCountryOption = findCountryCallingCodeOption(control, profileCountry);
     if (profileCountryOption) {
       if (currentlySelected?.index === profileCountryOption.index) continue;
-
-      const decision: DropdownDecision = {
-        controlId: control.id,
-        selector: control.selector,
-        selectedIndex: profileCountryOption.index,
-        selectedLabel: profileCountryOption.label,
-        confidence: 1,
-        optionSelector: profileCountryOption.selector,
-        source: 'profile',
-      };
-      decisions.push(decision);
+      const decision = makeDecision(control, profileCountryOption, 'profile');
+      result.decisions.push(decision);
       void cacheDropdown(control, profileFacts, decision);
       continue;
     }
@@ -245,7 +276,7 @@ export async function resolveDropdownsWithAI(
     const cached = await getCachedDropdown(control, profileFacts);
     if (cached) {
       console.info(`[JobFill Dropdown] Cache hit for "${control.question}": "${cached.selectedLabel}" (index ${cached.selectedIndex})`);
-      decisions.push(cached);
+      result.decisions.push(cached);
       continue;
     }
 
@@ -255,20 +286,32 @@ export async function resolveDropdownsWithAI(
       continue;
     }
 
-    candidates.push({
-      control,
-      choiceControl: toChoiceControl(control),
-      evidence: { profileFacts, memories: [], formAnswers: [] },
-    });
+    result.aiCandidates.push(control);
   }
 
-  if (!candidates.length) return decisions;
+  return result;
+}
+
+/** AI stage: one batched request for every control the rules could not answer. */
+export async function resolveDropdownAI(
+  controls: DropdownControl[],
+  profile: UserProfile,
+): Promise<DropdownDecision[]> {
+  if (!controls.length) return [];
+
+  const profileFacts = getProfileFactsWithPhoneDialingCodes(profile);
+  const candidates = controls.map((control) => ({
+    control,
+    choiceControl: toChoiceControl(control),
+    evidence: { profileFacts, memories: [], formAnswers: [] } as ChoiceEvidence,
+  }));
 
   const choiceDecisions = await resolveChoicesWithAI(
     candidates.map(({ choiceControl, evidence }) => ({ control: choiceControl, evidence })),
     { stage: 'call1' },
   );
 
+  const decisions: DropdownDecision[] = [];
   for (const choiceDecision of choiceDecisions) {
     const candidate = candidates.find(({ choiceControl }) => choiceControl.id === choiceDecision.controlId);
     if (!candidate) continue;
@@ -278,18 +321,19 @@ export async function resolveDropdownsWithAI(
     const originalOption = candidate.control.options.find((option) => option.index === Number(selectedId.split(':option:').at(-1)));
     if (!selectedOption || !originalOption || originalOption.disabled || isDropdownPlaceholder(originalOption.label)) continue;
 
-    const decision: DropdownDecision = {
-      controlId: candidate.control.id,
-      selector: candidate.control.selector,
-      selectedIndex: originalOption.index,
-      selectedLabel: originalOption.label,
-      confidence: choiceDecision.confidence,
-      optionSelector: originalOption.selector,
-      source: 'ai',
-    };
+    const decision = makeDecision(candidate.control, originalOption, 'ai', choiceDecision.confidence);
     decisions.push(decision);
     void cacheDropdown(candidate.control, profileFacts, decision);
   }
-
   return decisions;
+}
+
+/** Rules, then AI, for controls whose options are already loaded. */
+export async function resolveDropdownsWithAI(
+  controls: DropdownControl[],
+  profile?: UserProfile,
+): Promise<DropdownDecision[]> {
+  const rules = await resolveDropdownRules(controls, profile);
+  const ai = profile ? await resolveDropdownAI(rules.aiCandidates, profile) : [];
+  return [...rules.decisions, ...ai];
 }

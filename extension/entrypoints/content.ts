@@ -22,8 +22,8 @@ import type { ContentScriptRequest, ScanFieldsResponse, FillFieldsResponse, AISc
 import type { ScanResult } from '../types/autofill';
 import { applyChoiceDecisions, extractChoiceFormAnswers, scanChoiceControls } from '../utils/choiceControls';
 import type { ChoiceApplyResponse, ChoiceScanResponse } from '../types/choice';
-import { applyDropdownDecisions, scanDropdownControls } from '../utils/dropdownControls';
-import type { DropdownApplyResponse, DropdownScanResponse } from '../types/dropdown';
+import { applyDropdownDecisions, probeDropdownOptions, scanDropdownControls } from '../utils/dropdownControls';
+import type { DropdownApplyResponse, DropdownProbeResponse, DropdownScanResponse } from '../types/dropdown';
 import { disableScrollLock, enableScrollLock, withScrollLock } from '../utils/scrollLock';
 
 let lastPrescannedFingerprint: string | null = null;
@@ -305,7 +305,7 @@ export default defineContentScript({
       (
         message: ContentScriptRequest,
         _sender,
-        sendResponse: (response: ScanFieldsResponse | FillFieldsResponse | AIScanFieldsResponse | InjectFileResponse | DetectJobPageResponse | WaitForFormReadyResponse | PrescanResponse | ChoiceScanResponse | ChoiceApplyResponse | DropdownScanResponse | DropdownApplyResponse | { type: 'QUESTION_ANSWER_FILLED'; success: boolean }) => void,
+        sendResponse: (response: ScanFieldsResponse | FillFieldsResponse | AIScanFieldsResponse | InjectFileResponse | DetectJobPageResponse | WaitForFormReadyResponse | PrescanResponse | ChoiceScanResponse | ChoiceApplyResponse | DropdownScanResponse | DropdownApplyResponse | DropdownProbeResponse | { type: 'QUESTION_ANSWER_FILLED'; success: boolean }) => void,
       ) => {
         switch (message.type) {
           case 'SCAN_FIELDS': {
@@ -397,11 +397,21 @@ export default defineContentScript({
           }
 
           case 'DROPDOWN_SCAN': {
-            withScrollLock(() => scanDropdownControls()).then((controls) => {
+            withScrollLock(() => scanDropdownControls(message.lazy === true)).then((controls) => {
               sendResponse({ type: 'DROPDOWN_SCAN_RESULT', controls });
             }).catch((error) => {
               console.warn('[JobFill] Dropdown scan failed:', error);
               sendResponse({ type: 'DROPDOWN_SCAN_RESULT', controls: [] });
+            });
+            return true;
+          }
+
+          case 'DROPDOWN_PROBE': {
+            withScrollLock(() => probeDropdownOptions(message.selectors)).then((results) => {
+              sendResponse({ type: 'DROPDOWN_PROBE_RESULT', results });
+            }).catch((error) => {
+              console.warn('[JobFill] Dropdown probe failed:', error);
+              sendResponse({ type: 'DROPDOWN_PROBE_RESULT', results: [] });
             });
             return true;
           }
