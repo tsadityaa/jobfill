@@ -36,6 +36,9 @@ class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoundarySta
   }
 }
 
+// When shown as the floating in-page panel, tell the parent page the frame loaded (it falls back to the toolbar popup otherwise).
+if (window.parent !== window) window.parent.postMessage({ type: 'JOBFILL_PANEL_READY' }, '*');
+
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <ErrorBoundary>

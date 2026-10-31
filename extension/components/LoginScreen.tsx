@@ -142,7 +142,7 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
           color: 'var(--color-pc-text)',
           margin: 0,
           fontFamily: 'var(--font-sans)',
-        }}>JobFill</h1>
+        }}>MemoraFill</h1>
         <p style={{
           fontSize: '0.78rem',
           color: 'var(--color-pc-text-muted)',

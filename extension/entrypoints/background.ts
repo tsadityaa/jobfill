@@ -13,6 +13,7 @@
 
 /// <reference types="chrome" />
 
+import { togglePanelInPage, type PanelInjectResult } from '../utils/panelInjector';
 import { mapFieldsWithAI } from '../utils/aiMapper';
 import { ALL_INTENT_KEYS } from '../types/aiMapper';
 import { resolveProfileValue } from '../utils/fieldMapper';
@@ -1662,8 +1663,65 @@ async function runPrescanPipeline(tabId: number, googleFormsFrameId?: number): P
   }
 }
 
+const PANEL_TABS_KEY = 'jobfill_panel_tabs';
+
+async function setPanelOpen(tabId: number, open: boolean): Promise<void> {
+  const stored = (await chrome.storage.session.get(PANEL_TABS_KEY))[PANEL_TABS_KEY];
+  const tabs = new Set<number>(Array.isArray(stored) ? stored : []);
+  if (open) tabs.add(tabId);
+  else tabs.delete(tabId);
+  await chrome.storage.session.set({ [PANEL_TABS_KEY]: [...tabs] });
+}
+
+async function isPanelOpen(tabId: number): Promise<boolean> {
+  const stored = (await chrome.storage.session.get(PANEL_TABS_KEY))[PANEL_TABS_KEY];
+  return Array.isArray(stored) && stored.includes(tabId);
+}
+
+/** Show or hide the floating panel in the page's top frame. 'blocked' / 'unavailable' means use the classic popup. */
+async function showPanel(tabId: number, mode: 'toggle' | 'open'): Promise<PanelInjectResult | 'unavailable'> {
+  try {
+    const [injection] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: togglePanelInPage,
+      args: [chrome.runtime.getURL('/popup.html'), mode],
+    });
+    return (injection?.result as PanelInjectResult | undefined) ?? 'blocked';
+  } catch (error) {
+    console.warn(`[JobFill] Tab ${tabId}: floating panel unavailable`, error);
+    return 'unavailable';
+  }
+}
+
 export default defineBackground(() => {
   console.log('[JobFill] Background service worker started.');
+
+  // Toolbar click: toggle the floating panel; if the page blocks it, fall back to the classic popup.
+  chrome.action.onClicked.addListener(async (tab) => {
+    const tabId = tab.id;
+    if (tabId == null) return;
+    const result = await showPanel(tabId, 'toggle');
+    if (result === 'opened' || result === 'closed') {
+      await setPanelOpen(tabId, result === 'opened');
+      return;
+    }
+    await setPanelOpen(tabId, false);
+    try {
+      await chrome.action.setPopup({ tabId, popup: 'popup.html' });
+      await chrome.action.openPopup();
+    } catch (error) {
+      console.warn(`[JobFill] Tab ${tabId}: classic popup fallback failed`, error);
+    } finally {
+      // Restore click handling so the next click tries the floating panel again.
+      await chrome.action.setPopup({ tabId, popup: '' }).catch(() => undefined);
+    }
+  });
+
+  // The panel disappears on a full page load; bring it back for tabs where the user left it open.
+  chrome.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
+    if (changeInfo.status !== 'complete' || !(await isPanelOpen(tabId))) return;
+    if ((await showPanel(tabId, 'open')) === 'blocked') await setPanelOpen(tabId, false);
+  });
 
   // Clear badge on tab switch
   chrome.tabs.onActivated.addListener(async () => {
@@ -1770,6 +1828,11 @@ export default defineBackground(() => {
         });
         await runPrescanPipeline(tabId);
       });
+      return false;
+    }
+
+    if (message.type === 'PANEL_CLOSED') {
+      if (sender.tab?.id != null) void setPanelOpen(sender.tab.id, false);
       return false;
     }
 

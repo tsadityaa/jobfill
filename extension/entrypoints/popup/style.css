@@ -52,9 +52,11 @@ html { font-size: 14px; }
 
 body {
   width: 400px;
+  max-width: 100%;
   min-height: 500px;
   max-height: 600px;
   overflow-y: auto;
+  overflow-x: hidden;
   background: var(--color-pc-bg);
   color: var(--color-pc-text);
   font-family: var(--font-sans);

@@ -495,7 +495,7 @@ export default function OnboardingWizard({ initialProfile, onComplete, onSkip }:
               </div>
             </div>
             <h1 className="onboarding-title">
-              Welcome to <span className="gradient-text">JobFill</span>
+              Welcome to <span className="gradient-text">MemoraFill</span>
             </h1>
             <p className="onboarding-subtitle">
               {profile.personal.firstName
@@ -1451,7 +1451,7 @@ export default function OnboardingWizard({ initialProfile, onComplete, onSkip }:
                 onClick={handleComplete}
               >
                 <span className="onboarding-btn-glow" />
-                🚀 Save & Start Using JobFill
+                🚀 Save & Start Using MemoraFill
               </button>
             </div>
           </div>
@@ -1470,7 +1470,7 @@ export default function OnboardingWizard({ initialProfile, onComplete, onSkip }:
             </div>
             <h2 className="onboarding-step-title" style={{ marginTop: 24 }}>You're all set! 🎉</h2>
             <p className="onboarding-step-subtitle">
-              Your profile is saved. JobFill will now autofill forms for you.
+              Your profile is saved. MemoraFill will now autofill forms for you.
             </p>
           </div>
         )}

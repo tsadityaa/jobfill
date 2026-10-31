@@ -252,7 +252,7 @@ export default function App() {
             <path d="M12 3L2 8L12 13L22 8L12 3Z" fill="#00e5ff"/>
             <path d="M2.5 13L12 17.5L21.5 13M2.5 17L12 21.5L21.5 17" stroke="#ff9800" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"/>
           </svg>
-          <span className="gradient-text" style={{ fontSize: '1.25rem', letterSpacing: '-0.02em' }}>JobFill</span>
+          <span className="gradient-text" style={{ fontSize: '1.25rem', letterSpacing: '-0.02em' }}>MemoraFill</span>
           {saving ? (
             <span className="save-indicator animate-fade-in">
               <svg width="14" height="14" viewBox="0 0 14 14" fill="none" className="save-check-icon">

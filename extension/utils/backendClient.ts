@@ -16,7 +16,7 @@ export function getBackendBaseURL(): string {
 export async function getBackendSessionToken(): Promise<string> {
   getBackendBaseURL();
   const session = await getSession();
-  if (!session?.access_token) throw new Error('Sign in to JobFill before using AI features.');
+  if (!session?.access_token) throw new Error('Sign in to MemoraFill before using AI features.');
   return session.access_token;
 }
 

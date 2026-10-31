@@ -133,6 +133,13 @@ function extensionFileLoggerPlugin() {
 
 export default defineConfig({
   srcDir: '.',
+  hooks: {
+    // No default popup: a toolbar click then fires action.onClicked, which opens the floating panel.
+    // popup.html is still built; the background uses it as the panel page and as the fallback popup.
+    'build:manifestGenerated': (_wxt, manifest) => {
+      if (manifest.action) delete (manifest.action as { default_popup?: string }).default_popup;
+    },
+  },
   dev: {
     server: {
       port: 3001,
@@ -151,6 +158,9 @@ export default defineConfig({
     action: { default_title: 'MemoraFill' },
     permissions: ['storage', 'unlimitedStorage', 'activeTab', 'scripting', 'webNavigation', 'identity'],
     host_permissions: ['<all_urls>', 'https://eneyoicwuqjdaonccqkm.supabase.co/*'],
+    web_accessible_resources: [
+      { resources: ['popup.html', 'assets/*', 'chunks/*'], matches: ['<all_urls>'] },
+    ],
     icons: {
       '16': 'icon-16.png',
       '32': 'icon-32.png',
