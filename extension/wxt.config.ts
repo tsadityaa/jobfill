@@ -1,4 +1,6 @@
 import { defineConfig } from 'wxt';
+// Type-only import: loads the module's `consoleForward` augmentation of WXT's InlineConfig.
+import type {} from 'wxt-module-console-forward';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 import fs from 'node:fs';
