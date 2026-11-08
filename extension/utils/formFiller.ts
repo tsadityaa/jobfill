@@ -114,6 +114,8 @@ function getWorkdayDatePartValue(el: HTMLInputElement, value: string): string | 
   }
 
   if (!month || !year || Number(month) < 1 || Number(month) > 12) return null;
+  // Workday's MM box rejects an unpadded "5" and stays blank ("MM/2023" -> Invalid Date).
+  month = month.padStart(2, '0');
 
   if (automationId === 'dateSectionMonth-input') return month;
   if (automationId === 'dateSectionYear-input') return year;
@@ -264,10 +266,23 @@ function findCollegeAliasEntry(value: string): CollegeAliasEntry | undefined {
 }
 
 function getCollegeSearchNames(value: string): string[] {
-  const entry = findCollegeAliasEntry(value);
-  return entry
-    ? [...new Set([entry.canonical_name, ...entry.aliases, value.trim()])]
-    : [value.trim()];
+  const normalized = normalizeCollegeName(value);
+  const matchingEntries = COLLEGE_ALIAS_ENTRIES.filter((entry) =>
+    [entry.canonical_name, ...entry.aliases].some((name) => normalizeCollegeName(name) === normalized),
+  );
+  const allNames = new Set<string>();
+  // Prioritize canonical name first (e.g. if user has alias like IITB, search canonical name first)
+  for (const entry of matchingEntries) {
+    allNames.add(entry.canonical_name);
+  }
+  allNames.add(value.trim());
+  if (normalized.includes('vellore') || normalized === 'vit') {
+    allNames.add('Vellore Institute of Technology');
+    allNames.add('VIT');
+    allNames.add('VIT University');
+    allNames.add('Vellore Institute of Technology (VIT)');
+  }
+  return [...allNames];
 }
 
 const WORKDAY_SKILL_ALIASES: Record<string, string[]> = {
@@ -370,7 +385,7 @@ function isExactWorkdayOptionMatch(value: string, expected: string, isSchool: bo
     const normalized = normalizeCollegeName(value);
     return getCollegeSearchNames(expected).some((name) => {
       const candidate = normalizeCollegeName(name);
-      return normalized === candidate || normalized.startsWith(`${candidate} `);
+      return normalized === candidate;
     });
   }
 
@@ -390,7 +405,15 @@ function matchesWorkdayLabel(value: string, expected: string, isSchool: boolean)
   const cleaned = value
     .replace(/[×✕✖\u00d7\u2715\u2716]/g, ' ')
     .replace(/\b(remove|delete|close|selected)\b/gi, ' ');
-  if (isSchool) return isExactWorkdayOptionMatch(cleaned, expected, true);
+  if (isSchool) {
+    if (isExactWorkdayOptionMatch(cleaned, expected, true)) return true;
+    const normalized = normalizeCollegeName(cleaned);
+    const searchNames = getCollegeSearchNames(expected);
+    return searchNames.some((name) => {
+      const candidate = normalizeCollegeName(name);
+      return candidate.length >= 4 && (normalized === candidate || normalized.startsWith(`${candidate} `));
+    });
+  }
 
   const normalized = normalizeWorkdayLabel(cleaned);
   const normalizedExpected = normalizeWorkdayLabel(expected);
@@ -410,22 +433,40 @@ async function findWorkdayOption(input: HTMLInputElement, expected: string, isSc
     '[data-automation-id="activeListContainer"][role="listbox"], [role="listbox"][aria-label="Options Expanded"]',
   ).filter((listbox) => getComputedStyle(listbox).display !== 'none' && listbox.getClientRects().length > 0);
 
-  for (const listbox of listboxes) {
-    const options = Array.from(listbox.querySelectorAll<HTMLElement>('[role="option"]'))
-      .filter((option) => !multiselectId || option.querySelector<HTMLElement>('[data-uxi-multiselect-id]')
-        ?.getAttribute('data-uxi-multiselect-id') === multiselectId);
+  const getOptionText = (opt: HTMLElement): string => {
+    const leaf = opt.querySelector<HTMLElement>('[data-automation-id="promptLeafNode"]');
+    return (leaf?.innerText || leaf?.textContent || opt.innerText || opt.textContent || '').trim();
+  };
 
-    // 1. Exact match has highest priority (e.g. "Vellore Institute of Technology" over "University of Madras (Vellore Institute of Technology)")
+  for (const listbox of listboxes) {
+    const rawOptions = Array.from(listbox.querySelectorAll<HTMLElement>('[role="option"]'));
+    if (!rawOptions.length) continue;
+
+    const filteredOptions = multiselectId
+      ? rawOptions.filter((option) => {
+          const optId = option.getAttribute('data-uxi-multiselect-id')
+            ?? option.querySelector<HTMLElement>('[data-uxi-multiselect-id]')?.getAttribute('data-uxi-multiselect-id');
+          return optId === multiselectId;
+        })
+      : rawOptions;
+    const options = filteredOptions.length > 0 ? filteredOptions : rawOptions;
+
+    // 1. Exact match (exact college name, alias, or skill label)
     const exactMatch = options.find((option) =>
-      isExactWorkdayOptionMatch(option.innerText || option.textContent || '', expected, isSchool),
+      isExactWorkdayOptionMatch(getOptionText(option), expected, isSchool),
     );
     if (exactMatch) return exactMatch;
 
-    // 2. Prefix match (option label starts with the target name)
+    // 2. Strict prefix match (option label starts with the target name, e.g. "Vellore Institute of Technology, India")
+    const searchTerms = getWorkdaySearchTerms(expected, isSchool);
     const prefixMatch = options.find((option) => {
-      const text = normalizeWorkdayLabel(option.innerText || option.textContent || '');
-      return getWorkdaySearchTerms(expected, isSchool)
-        .some((term) => text.startsWith(normalizeWorkdayLabel(term)));
+      const optText = isSchool
+        ? normalizeCollegeName(getOptionText(option))
+        : normalizeWorkdayLabel(getOptionText(option));
+      return searchTerms.some((term) => {
+        const candidate = isSchool ? normalizeCollegeName(term) : normalizeWorkdayLabel(term);
+        return candidate.length >= 4 && (optText === candidate || optText.startsWith(`${candidate} `));
+      });
     });
     if (prefixMatch) return prefixMatch;
   }
@@ -474,10 +515,6 @@ async function fillWorkdayMultiSelect(selector: string, query: string, isSchool:
         const deadline = Date.now() + 3000;
         while (Date.now() < deadline) {
           const currentInput = getSearchInput();
-          if (normalizeWorkdayLabel(currentInput.value) !== normalizeWorkdayLabel(searchTerm)) {
-            await new Promise((resolve) => setTimeout(resolve, 150));
-            continue;
-          }
           exactOption = await findWorkdayOption(currentInput, expected, isSchool);
           if (exactOption) break;
           await new Promise((resolve) => setTimeout(resolve, 150));
@@ -486,14 +523,19 @@ async function fillWorkdayMultiSelect(selector: string, query: string, isSchool:
       }
       if (!exactOption) return false;
 
-      // Click the matched option and finish immediately
+      // Click the matched option and finish
       clickWorkdayOption(exactOption);
       await new Promise((resolve) => setTimeout(resolve, 100));
       return true;
     } finally {
       const input = getSearchInput();
-      if (input.value) setQuery(input, '');
-      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true, composed: true }));
+      const hasSelected = Array.from(initialContainer.querySelectorAll<HTMLElement>(
+        '[data-automation-id="selectedItem"], [data-automation-id*="selectedItem"], [data-automation-id="promptLeafNode"]'
+      )).some((item) => matchesWorkdayLabel(item.innerText || item.textContent || item.getAttribute('aria-label') || '', expected, isSchool));
+      if (!hasSelected && input.value) {
+        setQuery(input, '');
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true, composed: true }));
+      }
     }
   });
 }
@@ -504,7 +546,7 @@ async function closeWorkdayMultiSelect(selector: string): Promise<void> {
   const container = input?.closest<HTMLElement>('[data-automation-id="multiSelectContainer"]') ?? null;
   const searchInput = container?.querySelector<HTMLInputElement>('[data-automation-id="searchBox"]') ?? input;
 
-  if (searchInput) {
+  if (searchInput && searchInput !== input) {
     const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
     if (setter) setter.call(searchInput, '');
     else searchInput.value = '';
@@ -518,7 +560,7 @@ async function closeWorkdayMultiSelect(selector: string): Promise<void> {
     searchInput.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
   }
 
-  if (input && input !== searchInput) {
+  if (input) {
     input.blur();
     input.dispatchEvent(new FocusEvent('blur', { bubbles: true }));
     input.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
@@ -548,11 +590,23 @@ function isMappingSatisfied(mapping: FieldMapping): boolean {
     : null;
   if (workdayQueries) {
     const isSchool = isWorkdaySchoolField(mapping.profileField);
-    const container = element.closest<HTMLElement>('[data-automation-id="multiSelectContainer"]');
-    const selectedItems = Array.from(container?.querySelectorAll<HTMLElement>('[data-automation-id="selectedItem"]') ?? []);
-    return workdayQueries.every((query) => selectedItems.some((item) =>
-      matchesWorkdayLabel(item.innerText || item.getAttribute('aria-label') || '', query, isSchool),
+    const container = element.closest<HTMLElement>('[data-automation-id="multiSelectContainer"]') ?? element.parentElement;
+    const selectedElements = Array.from(container?.querySelectorAll<HTMLElement>(
+      '[data-automation-id="selectedItem"], [data-automation-id*="selectedItem"], [data-automation-id="promptLeafNode"]'
+    ) ?? []);
+    const elementValue = element.value ? [element.value] : [];
+    const candidateTexts = [
+      ...selectedElements.map((item) => item.innerText || item.textContent || item.getAttribute('aria-label') || ''),
+      ...elementValue,
+    ];
+    return workdayQueries.every((query) => candidateTexts.some((text) =>
+      matchesWorkdayLabel(text, query, isSchool),
     ));
+  }
+
+  if (element instanceof HTMLInputElement && element.type === 'checkbox') {
+    const shouldCheck = /^(?:true|yes|1|on|checked)$/i.test(mapping.value.trim());
+    return element.checked === shouldCheck;
   }
 
   if (element instanceof HTMLSelectElement) {
@@ -611,6 +665,29 @@ function fillSelect(el: HTMLSelectElement, value: string): boolean {
   }
 
   return false;
+}
+
+function fillCheckbox(el: HTMLInputElement, value: string): boolean {
+  const shouldCheck = /^(?:true|yes|1|on|checked)$/i.test(value.trim());
+  if (el.checked !== shouldCheck) {
+    el.click();
+  }
+  if (el.checked !== shouldCheck) {
+    const parent = el.closest('label') ?? el.parentElement;
+    if (parent && parent !== document.body) {
+      parent.click();
+    }
+  }
+  if (el.checked !== shouldCheck) {
+    const checkedSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'checked')?.set;
+    if (checkedSetter) {
+      checkedSetter.call(el, shouldCheck);
+    } else {
+      el.checked = shouldCheck;
+    }
+    dispatchInputEvents(el, true);
+  }
+  return el.checked === shouldCheck;
 }
 
 // ============================================================
@@ -863,6 +940,13 @@ async function fillFieldsPass(mappings: FieldMapping[]): Promise<AutofillResult>
         await closeWorkdayMultiSelect(mapping.selector);
         if (!ok) {
           results.push({ selector: mapping.selector, profileField: mapping.profileField, status: 'error', message: `No exact Workday suggestion found for "${failedQuery ?? mapping.value}"` });
+          errorCount++;
+          continue;
+        }
+      } else if (el instanceof HTMLInputElement && el.type === 'checkbox') {
+        ok = fillCheckbox(el, mapping.value);
+        if (!ok) {
+          results.push({ selector: mapping.selector, profileField: mapping.profileField, status: 'error', message: `Could not toggle checkbox for "${mapping.profileField}"` });
           errorCount++;
           continue;
         }

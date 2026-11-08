@@ -28,6 +28,19 @@ export interface WaitForFormReadyRequest {
   type: 'WAIT_FOR_FORM_READY';
 }
 
+/** Workday only: click "Add" in empty Work Experience / Education sections and wait for the fields. */
+export interface PrepareWorkdaySectionsRequest {
+  type: 'PREPARE_WORKDAY_SECTIONS';
+}
+
+export interface PrepareWorkdaySectionsResponse {
+  type: 'PREPARE_WORKDAY_SECTIONS_RESULT';
+  ok: boolean;
+  added: string[];
+  existing: string[];
+  error?: string;
+}
+
 /** Ask the content script to run a full pre-scan (detect + regex + sanitized fields + fingerprint) */
 export interface PrescanRequest {
   type: 'PRESCAN';
@@ -187,6 +200,7 @@ export type ExtensionMessage =
   | QuestionTasksResponse;
 
 export type ContentScriptRequest =
+  | PrepareWorkdaySectionsRequest
   | ScanFieldsRequest
   | FillFieldsRequest
   | AIScanFieldsRequest

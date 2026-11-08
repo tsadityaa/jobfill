@@ -18,7 +18,8 @@ import { getElementBySelector, hasVisibleFormFields, scanPageFields, extractSani
 import { fillFields, fillQuestionAnswer } from '../utils/formFiller';
 import { detectJobPage } from '../utils/jobPageDetector';
 import { computeFormFingerprint } from '../utils/formFingerprint';
-import type { ContentScriptRequest, ScanFieldsResponse, FillFieldsResponse, AIScanFieldsResponse, InjectFileResponse, DetectJobPageResponse, WaitForFormReadyResponse, PrescanResponse } from '../types/messages';
+import type { ContentScriptRequest, ScanFieldsResponse, FillFieldsResponse, AIScanFieldsResponse, InjectFileResponse, DetectJobPageResponse, WaitForFormReadyResponse, PrescanResponse, PrepareWorkdaySectionsResponse } from '../types/messages';
+import { prepareWorkdaySections } from '../utils/workdaySections';
 import type { ScanResult } from '../types/autofill';
 import { applyChoiceDecisions, extractChoiceFormAnswers, scanChoiceControls } from '../utils/choiceControls';
 import type { ChoiceApplyResponse, ChoiceScanResponse } from '../types/choice';
@@ -305,7 +306,7 @@ export default defineContentScript({
       (
         message: ContentScriptRequest,
         _sender,
-        sendResponse: (response: ScanFieldsResponse | FillFieldsResponse | AIScanFieldsResponse | InjectFileResponse | DetectJobPageResponse | WaitForFormReadyResponse | PrescanResponse | ChoiceScanResponse | ChoiceApplyResponse | DropdownScanResponse | DropdownApplyResponse | DropdownProbeResponse | { type: 'QUESTION_ANSWER_FILLED'; success: boolean }) => void,
+        sendResponse: (response: PrepareWorkdaySectionsResponse | ScanFieldsResponse | FillFieldsResponse | AIScanFieldsResponse | InjectFileResponse | DetectJobPageResponse | WaitForFormReadyResponse | PrescanResponse | ChoiceScanResponse | ChoiceApplyResponse | DropdownScanResponse | DropdownApplyResponse | DropdownProbeResponse | { type: 'QUESTION_ANSWER_FILLED'; success: boolean }) => void,
       ) => {
         switch (message.type) {
           case 'SCAN_FIELDS': {
@@ -338,6 +339,17 @@ export default defineContentScript({
             console.log(`[JobFill] Page classification: ${classification} (score: ${score})`);
             sendResponse({ type: 'DETECT_JOB_PAGE_RESULT', classification, score });
             break;
+          }
+
+          case 'PREPARE_WORKDAY_SECTIONS': {
+            const finishMutation = beginAutomatedFormMutation();
+            prepareWorkdaySections().then((result) => {
+              sendResponse({ type: 'PREPARE_WORKDAY_SECTIONS_RESULT', ...result });
+            }).catch((error) => {
+              console.warn('[JobFill] Workday section preparation failed:', error);
+              sendResponse({ type: 'PREPARE_WORKDAY_SECTIONS_RESULT', ok: false, added: [], existing: [], error: 'Could not prepare the Workday sections.' });
+            }).finally(finishMutation);
+            return true;
           }
 
           case 'WAIT_FOR_FORM_READY': {

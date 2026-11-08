@@ -7,317 +7,318 @@
 // ============================================================
 
 import type { DetectedField, ProfileFieldKey, FieldCategory } from '../types/autofill';
+import { matchFieldBySynonyms } from './fieldSynonyms';
 import { isSensitiveField } from './sensitiveFields';
 import { isApplicationQuestionCandidate } from './questionDetector';
 
 // ---- Layer 2: Known dictionary ----
-
-interface FieldPattern {
-  profileField: ProfileFieldKey;
-  patterns: RegExp[];
-  autocompleteValues: string[];
-  inputTypes?: string[];
-}
-
-const FIELD_DICTIONARY: FieldPattern[] = [
-  // ---- Personal ----
-  {
-    profileField: 'personal.firstName',
-    patterns: [
-      /first[_-]?name/i,
-      /fname/i,
-      /given[_-]?name/i,
-      /^first$/i,
-      /forename/i,
-    ],
-    autocompleteValues: ['given-name'],
-  },
-  {
-    profileField: 'personal.middleName',
-    patterns: [
-      /middle[_-]?name/i,
-      /mname/i,
-      /middle/i,
-    ],
-    autocompleteValues: ['additional-name'],
-  },
-  {
-    profileField: 'personal.lastName',
-    patterns: [
-      /last[_-]?name/i,
-      /lname/i,
-      /family[_-]?name/i,
-      /surname/i,
-      /last/i,
-    ],
-    autocompleteValues: ['family-name'],
-  },
-  {
-    profileField: 'personal.fullName',
-    patterns: [
-      /^full[_-]?name$/i,
-      /^name$/i,
-      /^your[_-]?name$/i,
-      /^applicant[_-]?name$/i,
-      /^legal[_-]?name$/i,
-      /^complete[_-]?name$/i,
-    ],
-    autocompleteValues: ['name'],
-  },
-  {
-    profileField: 'personal.dateOfBirth',
-    patterns: [
-      /^(date[_-]?of[_-]?)?birth$/i,
-      /^dob$/i,
-      /^birthday$/i,
-      /^birth[_-]?date$/i,
-    ],
-    autocompleteValues: ['bday'],
-    inputTypes: ['date'],
-  },
-  {
-    profileField: 'personal.gender',
-    patterns: [
-      /^gender$/i,
-      /^sex$/i,
-      /your[_-]?gender/i,
-      /gender[_-]?identity/i,
-    ],
-    autocompleteValues: ['sex'],
-  },
-  {
-    profileField: 'application.expectedJoiningDate',
-    patterns: [
-      /^expected[_-]?(?:date[_-]of[_-]?)?(?:joining|start)(?:[_-]?date)?$/i,
-      /^date[_-]?of[_-]?joining$/i,
-      /^joining[_-]?date$/i,
-    ],
-    autocompleteValues: [],
-  },
-
-  // ---- Contact ----
-  {
-    profileField: 'emails.primary',
-    patterns: [
-      /e[_-]?mail/i,
-      /^email[_-]?addr/i,
-      /^contact[_-]?email/i,
-    ],
-    autocompleteValues: ['email'],
-    inputTypes: ['email'],
-  },
-  {
-    profileField: 'phones.primary',
-    patterns: [
-      /^phone$/i,
-      /^mobile$/i,
-      /^tel$/i,
-      /^telephone$/i,
-      /^(?:phone|mobile|telephone|cell)[_-]?(?:number|no)$/i,
-      /^contact[_-]?(?:number|phone)$/i,
-      /^cell[_-]?phone$/i,
-    ],
-    autocompleteValues: ['tel', 'tel-national'],
-    inputTypes: ['tel'],
-  },
-
-  // ---- Address ----
-  {
-    profileField: 'addresses.primary.line1',
-    patterns: [
-      /^address[_-]?(line)?[_-]?1?$/i,
-      /^street[_-]?addr/i,
-      /^street$/i,
-      /^addr1$/i,
-    ],
-    autocompleteValues: ['address-line1', 'street-address'],
-  },
-  {
-    profileField: 'addresses.primary.line2',
-    patterns: [
-      /^address[_-]?(line)?[_-]?2$/i,
-      /^apt/i,
-      /^suite$/i,
-      /^addr2$/i,
-      /^apartment/i,
-    ],
-    autocompleteValues: ['address-line2'],
-  },
-  {
-    profileField: 'addresses.primary.city',
-    patterns: [
-      /^city$/i,
-      /^town$/i,
-      /^locality$/i,
-      /^municipality$/i,
-    ],
-    autocompleteValues: ['address-level2'],
-  },
-  {
-    profileField: 'addresses.primary.state',
-    patterns: [
-      /^state$/i,
-      /^province$/i,
-      /^region$/i,
-      /^county$/i,
-    ],
-    autocompleteValues: ['address-level1'],
-  },
-  {
-    profileField: 'addresses.primary.postalCode',
-    patterns: [
-      /^(post|zip)[_-]?(code|al)?$/i,
-      /^postal$/i,
-      /^pin[_-]?code$/i,
-    ],
-    autocompleteValues: ['postal-code'],
-  },
-  {
-    profileField: 'addresses.primary.country',
-    patterns: [
-      /^country$/i,
-      /^nation$/i,
-    ],
-    autocompleteValues: ['country', 'country-name'],
-  },
-
-  // ---- Education ----
-  {
-    profileField: 'education.latest.institution',
-    patterns: [
-      /^(school|university|college|institution)[_-]?(name)?$/i,
-      /^school[_-]?or[_-]?university$/i,
-      /^education(?:[_-]\d+)?[_-]+school$/i,
-      /^alma[_-]?mater$/i,
-    ],
-    autocompleteValues: [],
-  },
-  {
-    profileField: 'education.current.registrationNumber',
-    patterns: [
-      /^(academic[_-]?)?registration[_-]?(no|num|number)?$/i,
-      /^(student[_-]?)?(roll|enrollment)[_-]?(no|num|number)?$/i,
-      /^student[_-]?id$/i,
-      /^usn$/i,
-    ],
-    autocompleteValues: [],
-  },
-  {
-    profileField: 'education.latest.degree',
-    patterns: [
-      /^degree$/i,
-      /^qualification$/i,
-      /^degree[_-]?type$/i,
-    ],
-    autocompleteValues: [],
-  },
-  {
-    profileField: 'education.latest.field',
-    patterns: [
-      /^(field|area)[_-]?(of)?[_-]?(study|specialization)$/i,
-      /^education(?:[_-]\d+)?[_-]+fieldofstudy$/i,
-      /^major$/i,
-      /^concentration$/i,
-      /^discipline$/i,
-      /^branch$/i,
-    ],
-    autocompleteValues: [],
-  },
-  {
-    profileField: 'education.latest.gpa',
-    patterns: [
-      /^gpa$/i,
-      /^cgpa$/i,
-      /^grade$/i,
-      /^percentage$/i,
-    ],
-    autocompleteValues: [],
-  },
-
-  // ---- Experience ----
-  {
-    profileField: 'experience.latest.company',
-    patterns: [
-      /^company$/i,
-      /^employer$/i,
-      /^organization$/i,
-      /^organisation$/i,
-      /^company[_-]?name$/i,
-      /^current[_-]?employer$/i,
-    ],
-    autocompleteValues: ['organization'],
-  },
-  {
-    profileField: 'experience.latest.title',
-    patterns: [
-      /^(job[_-]?)?(title|position|role|designation)$/i,
-      /^current[_-]?title$/i,
-      /^current[_-]?position$/i,
-    ],
-    autocompleteValues: ['organization-title'],
-  },
-  {
-    profileField: 'experience.latest.location',
-    patterns: [
-      /workexperience.*location/i,
-      /^experience[_-]?location$/i,
-    ],
-    autocompleteValues: [],
-  },
-  {
-    profileField: 'experience.latest.startDate',
-    patterns: [
-      /workexperience.*(?:start|from)date/i,
-      /^(?:experience|employment)[_-]?(?:start|from)[_-]?date$/i,
-    ],
-    autocompleteValues: [],
-  },
-  {
-    profileField: 'experience.latest.endDate',
-    patterns: [
-      /workexperience.*(?:end|to)date/i,
-      /^(?:experience|employment)[_-]?(?:end|to)[_-]?date$/i,
-    ],
-    autocompleteValues: [],
-  },
-
-  // ---- Professional ----
-  {
-    profileField: 'professional.linkedin',
-    patterns: [
-      /linkedin/i,
-    ],
-    autocompleteValues: [],
-  },
-  {
-    profileField: 'professional.github',
-    patterns: [
-      /github/i,
-    ],
-    autocompleteValues: [],
-  },
-  {
-    profileField: 'professional.portfolio',
-    patterns: [
-      /portfolio/i,
-      /website/i,
-      /personal[_-]?(site|page|url)/i,
-    ],
-    autocompleteValues: ['url'],
-  },
-  {
-    profileField: 'professional.skills',
-    patterns: [
-      /^skills$/i,
-      /^(?:type[_-]?to[_-]?add[_-]?)?skills$/i,
-      /^skills[_-]+skills$/i,
-      /^key[_-]?skills$/i,
-      /^technical[_-]?skills$/i,
-      /^competencies$/i,
-    ],
-    autocompleteValues: [],
-  },
-];
+// 
+// interface FieldPattern {
+//   profileField: ProfileFieldKey;
+//   patterns: RegExp[];
+//   autocompleteValues: string[];
+//   inputTypes?: string[];
+// }
+// 
+// const FIELD_DICTIONARY: FieldPattern[] = [
+//   // ---- Personal ----
+//   {
+//     profileField: 'personal.firstName',
+//     patterns: [
+//       /first[_-]?name/i,
+//       /fname/i,
+//       /given[_-]?name/i,
+//       /^first$/i,
+//       /forename/i,
+//     ],
+//     autocompleteValues: ['given-name'],
+//   },
+//   {
+//     profileField: 'personal.middleName',
+//     patterns: [
+//       /middle[_-]?name/i,
+//       /mname/i,
+//       /middle/i,
+//     ],
+//     autocompleteValues: ['additional-name'],
+//   },
+//   {
+//     profileField: 'personal.lastName',
+//     patterns: [
+//       /last[_-]?name/i,
+//       /lname/i,
+//       /family[_-]?name/i,
+//       /surname/i,
+//       /last/i,
+//     ],
+//     autocompleteValues: ['family-name'],
+//   },
+//   {
+//     profileField: 'personal.fullName',
+//     patterns: [
+//       /^full[_-]?name$/i,
+//       /^name$/i,
+//       /^your[_-]?name$/i,
+//       /^applicant[_-]?name$/i,
+//       /^legal[_-]?name$/i,
+//       /^complete[_-]?name$/i,
+//     ],
+//     autocompleteValues: ['name'],
+//   },
+//   {
+//     profileField: 'personal.dateOfBirth',
+//     patterns: [
+//       /^(date[_-]?of[_-]?)?birth$/i,
+//       /^dob$/i,
+//       /^birthday$/i,
+//       /^birth[_-]?date$/i,
+//     ],
+//     autocompleteValues: ['bday'],
+//     inputTypes: ['date'],
+//   },
+//   {
+//     profileField: 'personal.gender',
+//     patterns: [
+//       /^gender$/i,
+//       /^sex$/i,
+//       /your[_-]?gender/i,
+//       /gender[_-]?identity/i,
+//     ],
+//     autocompleteValues: ['sex'],
+//   },
+//   {
+//     profileField: 'application.expectedJoiningDate',
+//     patterns: [
+//       /^expected[_-]?(?:date[_-]of[_-]?)?(?:joining|start)(?:[_-]?date)?$/i,
+//       /^date[_-]?of[_-]?joining$/i,
+//       /^joining[_-]?date$/i,
+//     ],
+//     autocompleteValues: [],
+//   },
+// 
+//   // ---- Contact ----
+//   {
+//     profileField: 'emails.primary',
+//     patterns: [
+//       /e[_-]?mail/i,
+//       /^email[_-]?addr/i,
+//       /^contact[_-]?email/i,
+//     ],
+//     autocompleteValues: ['email'],
+//     inputTypes: ['email'],
+//   },
+//   {
+//     profileField: 'phones.primary',
+//     patterns: [
+//       /^phone$/i,
+//       /^mobile$/i,
+//       /^tel$/i,
+//       /^telephone$/i,
+//       /^(?:phone|mobile|telephone|cell)[_-]?(?:number|no)$/i,
+//       /^contact[_-]?(?:number|phone)$/i,
+//       /^cell[_-]?phone$/i,
+//     ],
+//     autocompleteValues: ['tel', 'tel-national'],
+//     inputTypes: ['tel'],
+//   },
+// 
+//   // ---- Address ----
+//   {
+//     profileField: 'addresses.primary.line1',
+//     patterns: [
+//       /^address[_-]?(line)?[_-]?1?$/i,
+//       /^street[_-]?addr/i,
+//       /^street$/i,
+//       /^addr1$/i,
+//     ],
+//     autocompleteValues: ['address-line1', 'street-address'],
+//   },
+//   {
+//     profileField: 'addresses.primary.line2',
+//     patterns: [
+//       /^address[_-]?(line)?[_-]?2$/i,
+//       /^apt/i,
+//       /^suite$/i,
+//       /^addr2$/i,
+//       /^apartment/i,
+//     ],
+//     autocompleteValues: ['address-line2'],
+//   },
+//   {
+//     profileField: 'addresses.primary.city',
+//     patterns: [
+//       /^city$/i,
+//       /^town$/i,
+//       /^locality$/i,
+//       /^municipality$/i,
+//     ],
+//     autocompleteValues: ['address-level2'],
+//   },
+//   {
+//     profileField: 'addresses.primary.state',
+//     patterns: [
+//       /^state$/i,
+//       /^province$/i,
+//       /^region$/i,
+//       /^county$/i,
+//     ],
+//     autocompleteValues: ['address-level1'],
+//   },
+//   {
+//     profileField: 'addresses.primary.postalCode',
+//     patterns: [
+//       /^(post|zip)[_-]?(code|al)?$/i,
+//       /^postal$/i,
+//       /^pin[_-]?code$/i,
+//     ],
+//     autocompleteValues: ['postal-code'],
+//   },
+//   {
+//     profileField: 'addresses.primary.country',
+//     patterns: [
+//       /^country$/i,
+//       /^nation$/i,
+//     ],
+//     autocompleteValues: ['country', 'country-name'],
+//   },
+// 
+//   // ---- Education ----
+//   {
+//     profileField: 'education.latest.institution',
+//     patterns: [
+//       /^(school|university|college|institution)[_-]?(name)?$/i,
+//       /^school[_-]?or[_-]?university$/i,
+//       /^education(?:[_-]\d+)?[_-]+school$/i,
+//       /^alma[_-]?mater$/i,
+//     ],
+//     autocompleteValues: [],
+//   },
+//   {
+//     profileField: 'education.current.registrationNumber',
+//     patterns: [
+//       /^(academic[_-]?)?registration[_-]?(no|num|number)?$/i,
+//       /^(student[_-]?)?(roll|enrollment)[_-]?(no|num|number)?$/i,
+//       /^student[_-]?id$/i,
+//       /^usn$/i,
+//     ],
+//     autocompleteValues: [],
+//   },
+//   {
+//     profileField: 'education.latest.degree',
+//     patterns: [
+//       /^degree$/i,
+//       /^qualification$/i,
+//       /^degree[_-]?type$/i,
+//     ],
+//     autocompleteValues: [],
+//   },
+//   {
+//     profileField: 'education.latest.field',
+//     patterns: [
+//       /^(field|area)[_-]?(of)?[_-]?(study|specialization)$/i,
+//       /^education(?:[_-]\d+)?[_-]+fieldofstudy$/i,
+//       /^major$/i,
+//       /^concentration$/i,
+//       /^discipline$/i,
+//       /^branch$/i,
+//     ],
+//     autocompleteValues: [],
+//   },
+//   {
+//     profileField: 'education.latest.gpa',
+//     patterns: [
+//       /^gpa$/i,
+//       /^cgpa$/i,
+//       /^grade$/i,
+//       /^percentage$/i,
+//     ],
+//     autocompleteValues: [],
+//   },
+// 
+//   // ---- Experience ----
+//   {
+//     profileField: 'experience.latest.company',
+//     patterns: [
+//       /^company$/i,
+//       /^employer$/i,
+//       /^organization$/i,
+//       /^organisation$/i,
+//       /^company[_-]?name$/i,
+//       /^current[_-]?employer$/i,
+//     ],
+//     autocompleteValues: ['organization'],
+//   },
+//   {
+//     profileField: 'experience.latest.title',
+//     patterns: [
+//       /^(job[_-]?)?(title|position|role|designation)$/i,
+//       /^current[_-]?title$/i,
+//       /^current[_-]?position$/i,
+//     ],
+//     autocompleteValues: ['organization-title'],
+//   },
+//   {
+//     profileField: 'experience.latest.location',
+//     patterns: [
+//       /workexperience.*location/i,
+//       /^experience[_-]?location$/i,
+//     ],
+//     autocompleteValues: [],
+//   },
+//   {
+//     profileField: 'experience.latest.startDate',
+//     patterns: [
+//       /workexperience.*(?:start|from)date/i,
+//       /^(?:experience|employment)[_-]?(?:start|from)[_-]?date$/i,
+//     ],
+//     autocompleteValues: [],
+//   },
+//   {
+//     profileField: 'experience.latest.endDate',
+//     patterns: [
+//       /workexperience.*(?:end|to)date/i,
+//       /^(?:experience|employment)[_-]?(?:end|to)[_-]?date$/i,
+//     ],
+//     autocompleteValues: [],
+//   },
+// 
+//   // ---- Professional ----
+//   {
+//     profileField: 'professional.linkedin',
+//     patterns: [
+//       /linkedin/i,
+//     ],
+//     autocompleteValues: [],
+//   },
+//   {
+//     profileField: 'professional.github',
+//     patterns: [
+//       /github/i,
+//     ],
+//     autocompleteValues: [],
+//   },
+//   {
+//     profileField: 'professional.portfolio',
+//     patterns: [
+//       /portfolio/i,
+//       /website/i,
+//       /personal[_-]?(site|page|url)/i,
+//     ],
+//     autocompleteValues: ['url'],
+//   },
+//   {
+//     profileField: 'professional.skills',
+//     patterns: [
+//       /^skills$/i,
+//       /^(?:type[_-]?to[_-]?add[_-]?)?skills$/i,
+//       /^skills[_-]+skills$/i,
+//       /^key[_-]?skills$/i,
+//       /^technical[_-]?skills$/i,
+//       /^competencies$/i,
+//     ],
+//     autocompleteValues: [],
+//   },
+// ];
 
 // ---- Core Detection Functions ----
 
@@ -543,60 +544,44 @@ export function getLabelText(el: HTMLElement): string | undefined {
 }
 
 /**
- * Match an element against the field dictionary.
- * Returns the best match with confidence score.
+ * Match an element against the synonym registry (extension/data/field-synonyms.json).
+ * Returns the best match with confidence score, or null so the caller can fall back to the LLM.
+ * To teach the extension a new label, add a phrase to the JSON - no code change.
  */
 function matchField(
   attributes: DetectedField['attributes'],
   inputType: string,
 ): { profileField: ProfileFieldKey; confidence: number } | null {
-  let bestMatch: { profileField: ProfileFieldKey; confidence: number } | null = null;
-
-  for (const entry of FIELD_DICTIONARY) {
-    let confidence = 0;
-
-    // Layer 1: autocomplete attribute (highest confidence)
-    if (
-      attributes.autocomplete &&
-      entry.autocompleteValues.includes(attributes.autocomplete)
-    ) {
-      confidence = Math.max(confidence, 0.95);
-    }
-
-    // Layer 1: input type match
-    if (entry.inputTypes?.includes(inputType)) {
-      confidence = Math.max(confidence, 0.8);
-    }
-
-    // Layer 2: name/id pattern matching
-    const namesToCheck = [attributes.name, attributes.id].filter(Boolean) as string[];
-    for (const name of namesToCheck) {
-      if (entry.patterns.some((pattern) => pattern.test(name))) {
-        confidence = Math.max(confidence, 0.85);
-      }
-    }
-
-    // Layer 2: placeholder / aria-label / label text matching
-    const textsToCheck = [
-      attributes.placeholder,
-      attributes.ariaLabel,
-      attributes.labelText,
-    ].filter(Boolean) as string[];
-    for (const text of textsToCheck) {
-      // Normalize: remove special chars, collapse whitespace
-      const normalized = text.replace(/[^a-zA-Z0-9\s]/g, '').replace(/\s+/g, '_');
-      if (entry.patterns.some((pattern) => pattern.test(normalized))) {
-        confidence = Math.max(confidence, 0.7);
-      }
-    }
-
-    if (confidence > 0 && (!bestMatch || confidence > bestMatch.confidence)) {
-      bestMatch = { profileField: entry.profileField, confidence };
-    }
-  }
-
-  return bestMatch;
+  return matchFieldBySynonyms(attributes, inputType);
 }
+
+// --- Previous regex-based matcher (superseded by the synonym registry) ---
+// function matchField(
+//   attributes: DetectedField['attributes'],
+//   inputType: string,
+// ): { profileField: ProfileFieldKey; confidence: number } | null {
+//   let bestMatch: { profileField: ProfileFieldKey; confidence: number } | null = null;
+//   for (const entry of FIELD_DICTIONARY) {
+//     let confidence = 0;
+//     if (attributes.autocomplete && entry.autocompleteValues.includes(attributes.autocomplete)) {
+//       confidence = Math.max(confidence, 0.95);
+//     }
+//     if (entry.inputTypes?.includes(inputType)) confidence = Math.max(confidence, 0.8);
+//     const namesToCheck = [attributes.name, attributes.id].filter(Boolean) as string[];
+//     for (const name of namesToCheck) {
+//       if (entry.patterns.some((pattern) => pattern.test(name))) confidence = Math.max(confidence, 0.85);
+//     }
+//     const textsToCheck = [attributes.placeholder, attributes.ariaLabel, attributes.labelText].filter(Boolean) as string[];
+//     for (const text of textsToCheck) {
+//       const normalized = text.replace(/[^a-zA-Z0-9\s]/g, '').replace(/\s+/g, '_');
+//       if (entry.patterns.some((pattern) => pattern.test(normalized))) confidence = Math.max(confidence, 0.7);
+//     }
+//     if (confidence > 0 && (!bestMatch || confidence > bestMatch.confidence)) {
+//       bestMatch = { profileField: entry.profileField, confidence };
+//     }
+//   }
+//   return bestMatch;
+// }
 
 /**
  * Scan the current page for all fillable form fields.
@@ -685,12 +670,12 @@ export function scanPageFields(): DetectedField[] {
     }
 
     const currentValue = el.value || '';
-    const isApplicationQuestion = isApplicationQuestionCandidate({
+    const match = matchField(attributes, inputType);
+    const isApplicationQuestion = !match && isApplicationQuestionCandidate({
       tagName: el.tagName.toLowerCase(),
       inputType,
       attributes,
     });
-    const match = isApplicationQuestion ? null : matchField(attributes, inputType);
 
     detected.push({
       selector: getUniqueSelector(el),

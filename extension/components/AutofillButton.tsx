@@ -3,7 +3,8 @@ import { isDropdownAIEnabled, setDropdownAIEnabled } from '../utils/dropdownSett
 import ScanLoader from './ScanLoader';
 import type { UserProfile } from '../types/profile';
 import type { ScanResult, AutofillResult, FieldMapping } from '../types/autofill';
-import type { ScanFieldsResponse, FillFieldsResponse, AIScanFieldsResponse } from '../types/messages';
+import type { ScanFieldsResponse, FillFieldsResponse, AIScanFieldsResponse, PrepareWorkdaySectionsResponse } from '../types/messages';
+import { isWorkdayHost } from '../utils/workdayRules';
 import type { SanitizedField, FieldIdLookup } from '../types/aiMapper';
 import type { QuestionTask } from '../types/questionTask';
 import type { FileUploadTask } from '../types/fileUploadTask';
@@ -12,6 +13,7 @@ import { mapFieldsWithAI } from '../utils/aiMapper';
 import { getTabResult, clearTabResult, GOOGLE_FORM_MAPPING_VERSION } from '../utils/mappingCache';
 import { getQuestionState } from '../utils/questionTaskStore';
 import { clearFileUploadState, getFileUploadState } from '../utils/fileUploadTaskStore';
+import { isAlreadyFilled } from '../utils/fieldState';
 
 interface AutofillButtonProps {
   profile: UserProfile;
@@ -296,6 +298,19 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
         }
       };
 
+      // ---- Workday: click "Add" in empty Work Experience / Education sections, then scan as usual ----
+      // The cache is dropped only when a new entry form was actually added.
+      if (isWorkdayHost(tab.url ? new URL(tab.url).hostname : '')) {
+        const prepared = await sendToMainFrame<PrepareWorkdaySectionsResponse>(tab.id, { type: 'PREPARE_WORKDAY_SECTIONS' });
+        if (prepared && prepared.ok === false) {
+          throw new Error(prepared.error ?? 'Could not prepare the Workday sections.');
+        }
+        if (prepared?.added?.length) {
+          await clearTabResult(tab.id);
+          await chrome.runtime.sendMessage({ type: 'REQUEST_PRESCAN', tabId: tab.id, force: true });
+        }
+      }
+
       let cached = await getTabResult(tab.id);
 
       let isGoogleFormsTab = /^https:\/\/docs\.google\.com\/forms\//i.test(tab.url ?? '')
@@ -417,7 +432,8 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
         mergedResult.fields.push(...resp.result.fields);
       }
 
-      const unknownFields = mergedResult.fields.filter((f) => f.category === 'UNKNOWN');
+      // Already-filled fields are never re-sent to the LLM on a rescan.
+      const unknownFields = mergedResult.fields.filter((f) => f.category === 'UNKNOWN' && !isAlreadyFilled(f));
       let resolvedAiMappings: FieldMapping[] = [];
 
       // Step 2: If there are UNKNOWN fields, try AI mapping (Layer 3)

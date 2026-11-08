@@ -22,6 +22,7 @@ import { getCurrentUser } from '../utils/supabase';
 import { searchMemory, syncProfileToMemory } from '../utils/memory';
 import { extractProfileFieldFromDocuments, formatProfileAnswerContext, generateApplicationAnswer } from '../utils/answerGenerator';
 import { detectApplicationQuestions } from '../utils/questionDetector';
+import { isAlreadyFilled } from '../utils/fieldState';
 import {
   cacheChoice,
   getCachedChoice,
@@ -1337,6 +1338,8 @@ async function runPrescanPipeline(tabId: number, googleFormsFrameId?: number): P
     const cached = await getCachedMapping(fingerprint);
     const cachedSelectors = new Set(cached?.aiMappings.map((mapping) => mapping.selector) ?? []);
     const hasUnmappedFallbackField = scanResult.fields.some((field) => {
+      // Fields that already hold a value never need the LLM again (Scan Again after a fill).
+      if (isAlreadyFilled(field)) return false;
       if ((field.category === 'UNKNOWN' || field.category === 'APPLICATION_QUESTION') && !cachedSelectors.has(field.selector)) return true;
       if (field.category !== 'SAFE_AUTO' || !field.profileField || cachedSelectors.has(field.selector)) return false;
       return !profile || !resolveProfileValue(profile, field.profileField)?.trim();
@@ -1367,21 +1370,23 @@ async function runPrescanPipeline(tabId: number, googleFormsFrameId?: number): P
       await fillLateProfileMappings(tabId, frameId);
       return;
     }
-
     if (isGoogleForm) {
-      for (const field of scanResult.fields) {
-        const normalizedLabel = (field.attributes.labelText ?? '')
-          .toLowerCase()
-          .replace(/[^a-z0-9]+/g, ' ')
-          .trim();
-        if (/^(reg|registration|roll) no(?:mber)?$/.test(normalizedLabel) || normalizedLabel === 'name') {
-          field.profileField = null;
-          field.category = 'UNKNOWN';
-          field.confidence = 0;
-        }
-      }
+      // Superseded by data/field-synonyms.json: "name" and registration/roll-number labels are now
+      // matched locally (and re-checked via the LLM only when the profile has no value or the field is empty).
+      // for (const field of scanResult.fields) {
+      //   const normalizedLabel = (field.attributes.labelText ?? '')
+      //     .toLowerCase()
+      //     .replace(/[^a-z0-9]+/g, ' ')
+      //     .trim();
+      //   if (/^(reg|registration|roll) no(?:mber)?$/.test(normalizedLabel) || normalizedLabel === 'name') {
+      //     field.profileField = null;
+      //     field.category = 'UNKNOWN';
+      //     field.confidence = 0;
+      //   }
+      // }
 
       const fallbackSelectors = new Set(scanResult.fields.flatMap((field) => {
+        if (isAlreadyFilled(field)) return [];
         if (field.category === 'APPLICATION_QUESTION') return [field.selector];
         if (field.category === 'UNKNOWN') return [field.selector];
         if (field.category !== 'SAFE_AUTO' || !field.profileField) return [];
@@ -1450,6 +1455,7 @@ async function runPrescanPipeline(tabId: number, googleFormsFrameId?: number): P
               if (!selector || gfExistingSelectors.has(selector)) continue;
 
               const field = scanResult.fields.find((item) => item.selector === selector);
+              if (field && isAlreadyFilled(field)) continue;
               const isOtherWriteIn =
                 /^(?:other\s*(?:response|option|answer)?|other:?)$/i.test(field?.attributes.ariaLabel ?? '') ||
                 /^(?:other\s*(?:response|option|answer)?|other:?)$/i.test(field?.attributes.placeholder ?? '') ||
@@ -1519,6 +1525,7 @@ async function runPrescanPipeline(tabId: number, googleFormsFrameId?: number): P
 
     // Finish profile matching before scheduling any question-answer work.
     const fallbackSelectors = new Set(scanResult.fields.flatMap((field) => {
+      if (isAlreadyFilled(field)) return [];
       if (field.category === 'UNKNOWN' || field.category === 'APPLICATION_QUESTION') return [field.selector];
       if (field.category !== 'SAFE_AUTO' || !field.profileField) return [];
       const value = profile ? resolveProfileValue(profile, field.profileField) : undefined;
@@ -1585,6 +1592,7 @@ async function runPrescanPipeline(tabId: number, googleFormsFrameId?: number): P
             if (!selector || existingSelectors.has(selector)) continue;
 
             const field = scanResult.fields.find((item) => item.selector === selector);
+            if (field && isAlreadyFilled(field)) continue;
             const isOtherWriteIn =
               /^(?:other\s*(?:response|option|answer)?|other:?)$/i.test(field?.attributes.ariaLabel ?? '') ||
               /^(?:other\s*(?:response|option|answer)?|other:?)$/i.test(field?.attributes.placeholder ?? '') ||
@@ -1743,6 +1751,8 @@ export default defineBackground(() => {
   chrome.runtime.onMessage.addListener((message, sender, _sendResponse) => {
     if (message.type === 'REQUEST_PRESCAN') {
       const tabId = message.tabId;
+      // Workday: sections were just expanded, so bypass the duplicate-scan gap for a fresh live scan.
+      if (message.force === true && Number.isInteger(tabId)) lastPrescanAtByTab.delete(tabId);
       if (Number.isInteger(tabId) && !runningTabs.has(tabId)) {
         void findGoogleFormsFrameId(tabId).then((frameId) => {
           if (!runningTabs.has(tabId)) void runPrescanPipeline(tabId, frameId ?? undefined);
