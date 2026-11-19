@@ -3,7 +3,9 @@ import { inferDocumentType } from '../types/document';
 
 const REGISTRY_KEY = 'jf_document_registry';
 
-type RegistryMetadata = Pick<StoredDocument, 'documentType' | 'tags' | 'version' | 'isPrimary'>;
+type RegistryMetadata = Pick<StoredDocument, 'documentType' | 'tags' | 'version' | 'isPrimary'> & {
+  thumbnail?: string;
+};
 type RegistryStore = Record<string, RegistryMetadata>;
 
 function readRegistry(): Promise<RegistryStore> {
@@ -56,6 +58,7 @@ export async function saveDocumentRegistryMetadata(document: StoredDocument): Pr
       tags: metadata.tags,
       version: metadata.version,
       isPrimary: metadata.isPrimary,
+      thumbnail: metadata.thumbnail || registry[document.id]?.thumbnail,
     };
     await writeRegistry(registry);
   } catch (error) {
@@ -65,10 +68,14 @@ export async function saveDocumentRegistryMetadata(document: StoredDocument): Pr
 
 export async function mergeDocumentRegistryMetadata(documents: StoredDocument[]): Promise<StoredDocument[]> {
   const registry = await readRegistry();
-  const enriched = documents.map((document) => withInferredDocumentMetadata({
-    ...document,
-    ...registry[document.id],
-  }));
+  const enriched = documents.map((document) => {
+    const reg = registry[document.id];
+    return withInferredDocumentMetadata({
+      ...document,
+      ...reg,
+      thumbnail: reg?.thumbnail || document.thumbnail,
+    });
+  });
   const types = [...new Set(enriched.map((document) => document.documentType))];
 
   for (const documentType of types) {
@@ -82,6 +89,7 @@ export async function mergeDocumentRegistryMetadata(documents: StoredDocument[])
         tags: document.tags,
         version: document.version,
         isPrimary: document.isPrimary,
+        thumbnail: document.thumbnail || registry[document.id]?.thumbnail,
       };
     }
   }

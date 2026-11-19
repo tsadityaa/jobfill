@@ -297,7 +297,7 @@ export default function App() {
       <Navigation activeTab={activeTab} onTabChange={setActiveTab} />
 
       {/* Content */}
-      <div className="content" style={{ flex: 1 }}>
+      <div className={`content ${activeTab === 'agent' ? 'content-agent' : ''}`} style={{ flex: 1 }}>
         {activeTab === 'details' && (
           <ProfileSection profile={profile} onSave={handleSaveProfile} />
         )}

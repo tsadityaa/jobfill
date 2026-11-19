@@ -84,6 +84,19 @@ export default function DocumentsSection() {
       const docs = await loadAllDocumentMetadata();
       docs.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
       setDocuments(docs);
+
+      // Fast background cache: preload and persist thumbnails for any images missing them
+      for (const d of docs) {
+        if ((isImageType(d.mimeType) || /\.(png|jpe?g|webp|gif)$/i.test(d.originalName)) && !d.thumbnail) {
+          cloudLoadDocumentBlob(d.id).then(async (blob) => {
+            const thumb = await generateThumbnail(blob, 80);
+            await saveDocumentRegistryMetadata({ ...d, thumbnail: thumb });
+            setDocuments((prev) =>
+              prev.map((item) => (item.id === d.id ? { ...item, thumbnail: thumb } : item))
+            );
+          }).catch(() => {});
+        }
+      }
     } catch (err) {
       console.error('Failed to load documents:', err);
     } finally {
@@ -236,6 +249,43 @@ export default function DocumentsSection() {
       setDocuments((prev) => prev.filter((d) => d.id !== doc.id));
     } catch (err) {
       console.error('Delete failed:', err);
+    }
+  }, []);
+
+  // Replace document file
+  const handleReplace = useCallback(async (doc: StoredDocument, file: File) => {
+    try {
+      const mimeType = getUploadMimeType(file) || doc.mimeType;
+      const isImage = isImageType(mimeType);
+      let width: number | undefined;
+      let height: number | undefined;
+      let thumbnail: string | undefined;
+
+      if (isImage) {
+        const dims = await getImageDimensions(file);
+        width = dims.width;
+        height = dims.height;
+        thumbnail = await generateThumbnail(file, 80);
+      }
+
+      const now = new Date().toISOString();
+      const updated: StoredDocument = {
+        ...doc,
+        name: file.name.replace(/\.[^.]+$/, ''),
+        originalName: file.name,
+        mimeType,
+        sizeBytes: file.size,
+        width,
+        height,
+        thumbnail: thumbnail ?? doc.thumbnail,
+        updatedAt: now,
+      };
+
+      await saveDocument(updated, file);
+      await saveDocumentRegistryMetadata(updated);
+      setDocuments((prev) => prev.map((d) => d.id === doc.id ? updated : d));
+    } catch (err) {
+      console.error('Replace failed:', err);
     }
   }, []);
 
@@ -432,6 +482,7 @@ export default function DocumentsSection() {
               onDocumentTypeChange={handleDocumentTypeChange}
               onDelete={handleDelete}
               onUploadToPage={handleUploadToPage}
+              onReplace={handleReplace}
             />
           ))}
         </div>

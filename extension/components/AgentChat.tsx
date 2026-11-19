@@ -99,6 +99,14 @@ async function extractPdfText(blob: Blob, filename: string): Promise<string> {
   }
 }
 
+const QUICK_PROMPTS = [
+  { icon: '📋', text: 'What info is missing from my profile?' },
+  { icon: '💼', text: 'Why should we hire you? (generate answer)' },
+  { icon: '📝', text: 'Summarize my resume' },
+  { icon: '📦', text: 'Compress my resume PDF' },
+  { icon: '🔍', text: 'What fields can autofill on a job form?' },
+];
+
 export default function AgentChat({ profile }: AgentChatProps) {
   const [messages, setMessages] = useState<Message[]>(() => {
     try {
@@ -198,7 +206,10 @@ export default function AgentChat({ profile }: AgentChatProps) {
 
   const handleSend = async () => {
     const text = input.trim();
-    if (!text || loading) return;
+    if (!text || loading) {
+      inputRef.current?.focus();
+      return;
+    }
 
     const userMsg: Message = { role: 'user', content: text };
     const updatedMessages = [...messages, userMsg];
@@ -285,74 +296,61 @@ export default function AgentChat({ profile }: AgentChatProps) {
   };
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: '360px' }}>
-      
-
+    <div className="agent-container">
       {/* Messages area */}
-      <div style={{
-        flex: 1,
-        overflowY: 'auto',
-        padding: '8px 4px',
-        display: 'flex',
-        flexDirection: 'column',
-        gap: '8px',
-      }}>
+      <div className="agent-messages-area">
         {messages.length === 0 ? (
-          /* Empty state */
+          /* Empty state matching the Apple glass UI */
           <div className="agent-placeholder">
-            <div className="icon" style={{ animation: 'float 6s ease-in-out infinite' }}>
-              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style={{ filter: 'drop-shadow(0 4px 12px rgba(0,212,255,0.4))' }}>
-                <path d="M12 2V6M12 18V22M6 12H2M22 12H18M19.07 4.93L16.24 7.76M7.76 16.24L4.93 19.07M19.07 19.07L16.24 16.24M7.76 7.76L4.93 4.93" stroke="url(#paint0_linear)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-                <circle cx="12" cy="12" r="4" fill="url(#paint0_linear)"/>
+            <div className="agent-icon-wrapper">
+              <svg
+                className="agent-sunburst-svg"
+                width="52"
+                height="52"
+                viewBox="0 0 52 52"
+                fill="none"
+                xmlns="http://www.w3.org/2000/svg"
+              >
                 <defs>
-                  <linearGradient id="paint0_linear" x1="2" y1="2" x2="22" y2="22" gradientUnits="userSpaceOnUse">
-                    <stop stopColor="var(--color-pc-accent-start)"/>
-                    <stop offset="1" stopColor="var(--color-pc-accent-end)"/>
+                  <linearGradient id="apple_agent_sunburst" x1="14" y1="6" x2="38" y2="46" gradientUnits="userSpaceOnUse">
+                    <stop offset="0%" stopColor="#fef08a" />
+                    <stop offset="25%" stopColor="#a3e635" />
+                    <stop offset="65%" stopColor="#38bdf8" />
+                    <stop offset="100%" stopColor="#0ea5e9" />
                   </linearGradient>
                 </defs>
+                {/* Center circle */}
+                <circle cx="26" cy="26" r="7.5" fill="url(#apple_agent_sunburst)" />
+                {/* 8 rounded radial rays */}
+                <line x1="26" y1="5.5" x2="26" y2="13" stroke="url(#apple_agent_sunburst)" strokeWidth="3.2" strokeLinecap="round" />
+                <line x1="26" y1="39" x2="26" y2="46.5" stroke="url(#apple_agent_sunburst)" strokeWidth="3.2" strokeLinecap="round" />
+                <line x1="39" y1="26" x2="46.5" y2="26" stroke="url(#apple_agent_sunburst)" strokeWidth="3.2" strokeLinecap="round" />
+                <line x1="5.5" y1="26" x2="13" y2="26" stroke="url(#apple_agent_sunburst)" strokeWidth="3.2" strokeLinecap="round" />
+                <line x1="35.2" y1="16.8" x2="40.5" y2="11.5" stroke="url(#apple_agent_sunburst)" strokeWidth="3.2" strokeLinecap="round" />
+                <line x1="16.8" y1="35.2" x2="11.5" y2="40.5" stroke="url(#apple_agent_sunburst)" strokeWidth="3.2" strokeLinecap="round" />
+                <line x1="35.2" y1="35.2" x2="40.5" y2="40.5" stroke="url(#apple_agent_sunburst)" strokeWidth="3.2" strokeLinecap="round" />
+                <line x1="16.8" y1="16.8" x2="11.5" y2="11.5" stroke="url(#apple_agent_sunburst)" strokeWidth="3.2" strokeLinecap="round" />
               </svg>
             </div>
             <div className="title">Agent</div>
             <div className="desc">
               Ask me anything about your profile, resume, or get help with job applications.
             </div>
+
             {/* Quick prompts */}
-            <div style={{ marginTop: '16px', display: 'flex', flexDirection: 'column', gap: '6px', width: '100%', maxWidth: '280px' }}>
-              {[
-                '📋 What info is missing from my profile?',
-                '💼 Why should we hire you? (generate answer)',
-                '📝 Summarize my resume',
-                '📦 Compress my resume PDF',
-                '🔍 What fields can autofill on a job form?',
-              ].map((prompt) => (
+            <div className="agent-prompts-list">
+              {QUICK_PROMPTS.map((prompt) => (
                 <button
-                  key={prompt}
-                  style={{
-                    background: 'var(--color-pc-surface)',
-                    border: '1px solid var(--color-pc-border)',
-                    borderRadius: '8px',
-                    padding: '8px 12px',
-                    color: 'var(--color-pc-text-secondary)',
-                    fontSize: '0.75rem',
-                    textAlign: 'left',
-                    cursor: 'pointer',
-                    transition: 'all 0.2s ease',
-                    fontFamily: 'var(--font-sans)',
-                  }}
-                  onMouseEnter={(e) => {
-                    (e.target as HTMLElement).style.borderColor = 'var(--color-pc-accent-start)';
-                    (e.target as HTMLElement).style.color = 'var(--color-pc-text)';
-                  }}
-                  onMouseLeave={(e) => {
-                    (e.target as HTMLElement).style.borderColor = 'var(--color-pc-border)';
-                    (e.target as HTMLElement).style.color = 'var(--color-pc-text-secondary)';
-                  }}
+                  key={prompt.text}
+                  type="button"
+                  className={`agent-prompt-btn ${input === prompt.text ? 'active' : ''}`}
                   onClick={() => {
-                    setInput(prompt.replace(/^[^\s]+\s/, ''));
+                    setInput(prompt.text);
                     inputRef.current?.focus();
                   }}
                 >
-                  {prompt}
+                  <span className="agent-prompt-icon">{prompt.icon}</span>
+                  <span className="agent-prompt-text">{prompt.text}</span>
                 </button>
               ))}
             </div>
@@ -362,47 +360,15 @@ export default function AgentChat({ profile }: AgentChatProps) {
             {messages.map((msg, i) => (
               <div
                 key={i}
-                style={{
-                  display: 'flex',
-                  flexDirection: 'column',
-                  alignItems: msg.role === 'user' ? 'flex-end' : 'flex-start',
-                  animation: 'fadeIn 0.2s ease-out',
-                  position: 'relative',
-                  width: '100%',
-                }}
+                className="agent-msg-row"
+                style={{ alignItems: msg.role === 'user' ? 'flex-end' : 'flex-start' }}
                 onMouseEnter={() => setHoveredMsgIdx(i)}
                 onMouseLeave={() => setHoveredMsgIdx(null)}
               >
-                <div style={{
-                  maxWidth: '88%',
-                  padding: '8px 12px',
-                  borderRadius: msg.role === 'user' ? '12px 12px 2px 12px' : '12px 12px 12px 2px',
-                  background: msg.role === 'user'
-                    ? 'linear-gradient(135deg, var(--color-pc-accent-start), var(--color-pc-accent-end))'
-                    : 'var(--color-pc-surface)',
-                  border: msg.role === 'assistant' ? '1px solid var(--color-pc-border)' : 'none',
-                  color: 'var(--color-pc-text)',
-                  fontSize: '0.82rem',
-                  lineHeight: '1.5',
-                  wordBreak: 'break-word',
-                  position: 'relative',
-                }}>
+                <div className={`agent-msg-bubble ${msg.role}`}>
                   {msg.role === 'assistant' && hoveredMsgIdx === i && (
                     <button
-                      style={{
-                        position: 'absolute',
-                        top: '-8px',
-                        right: '-8px',
-                        background: 'var(--color-pc-surface)',
-                        border: '1px solid var(--color-pc-border)',
-                        borderRadius: '4px',
-                        padding: '2px 6px',
-                        fontSize: '0.7rem',
-                        color: 'var(--color-pc-text-muted)',
-                        cursor: 'pointer',
-                        boxShadow: '0 2px 4px rgba(0,0,0,0.1)',
-                        zIndex: 10,
-                      }}
+                      className="agent-copy-btn"
                       onClick={async () => {
                         await navigator.clipboard.writeText(msg.content);
                         setCopiedMsgIdx(i);
@@ -424,25 +390,13 @@ export default function AgentChat({ profile }: AgentChatProps) {
             {/* Loading indicator */}
             {loading && (
               <div style={{ display: 'flex', alignItems: 'flex-start' }}>
-                <div style={{
-                  padding: '8px 14px',
-                  borderRadius: '12px 12px 12px 2px',
-                  background: 'var(--color-pc-surface)',
-                  border: '1px solid var(--color-pc-border)',
-                  display: 'flex',
-                  gap: '4px',
-                  alignItems: 'center',
-                }}>
+                <div className="agent-loading-bubble">
                   {[0, 1, 2].map((i) => (
-                    <span key={i} style={{
-                      width: '5px',
-                      height: '5px',
-                      borderRadius: '50%',
-                      background: 'var(--color-pc-accent-start)',
-                      display: 'inline-block',
-                      animation: 'dot-pulse 1.2s ease-in-out infinite',
-                      animationDelay: `${i * 0.2}s`,
-                    }} />
+                    <span
+                      key={i}
+                      className="agent-loading-dot"
+                      style={{ animationDelay: `${i * 0.2}s` }}
+                    />
                   ))}
                 </div>
               </div>
@@ -455,12 +409,12 @@ export default function AgentChat({ profile }: AgentChatProps) {
 
       {/* Inline Previews */}
       {inlinePreviews.length > 0 && (
-        <div style={{ padding: '0 16px 12px', display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <div style={{ padding: '0 14px 10px', display: 'flex', flexDirection: 'column', gap: 8 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--color-pc-text)' }}>Processed File(s)</span>
+            <span style={{ fontSize: '0.75rem', fontWeight: 600, color: '#e2e8f0' }}>Processed File(s)</span>
             <div style={{ display: 'flex', gap: 12 }}>
               <button
-                style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--color-pc-primary)', fontSize: '0.7rem', fontWeight: 600 }}
+                style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#38bdf8', fontSize: '0.7rem', fontWeight: 600 }}
                 onClick={() => {
                   inlinePreviews.forEach(p => {
                     const a = document.createElement('a');
@@ -471,14 +425,14 @@ export default function AgentChat({ profile }: AgentChatProps) {
                 }}
               >⬇ Download All</button>
               <button
-                style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--color-pc-text-muted)', fontSize: '0.7rem' }}
+                style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8', fontSize: '0.7rem' }}
                 onClick={() => setInlinePreviews([])}
               >✕ Close</button>
             </div>
           </div>
-          <div style={{ maxHeight: '200px', overflowY: 'auto', borderRadius: 8, background: '#fff' }}>
+          <div style={{ maxHeight: '180px', overflowY: 'auto', borderRadius: 10, background: 'rgba(0,0,0,0.5)', border: '1px solid rgba(255,255,255,0.1)' }}>
             {inlinePreviews.map((preview, i) => (
-              <iframe key={i} src={`${preview.url}#toolbar=0`} width="100%" height="200px" style={{ border: 'none', marginBottom: i === inlinePreviews.length - 1 ? 0 : 8 }} title={preview.name} />
+              <iframe key={i} src={`${preview.url}#toolbar=0`} width="100%" height="180px" style={{ border: 'none', marginBottom: i === inlinePreviews.length - 1 ? 0 : 8 }} title={preview.name} />
             ))}
           </div>
         </div>
@@ -487,17 +441,9 @@ export default function AgentChat({ profile }: AgentChatProps) {
       {/* Input area */}
       <div className="agent-input-area">
         {messages.length > 0 && (
-          <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '6px' }}>
+          <div className="agent-input-toolbar">
             <button
-              style={{
-                background: 'none',
-                border: 'none',
-                color: 'var(--color-pc-text-muted)',
-                fontSize: '0.68rem',
-                cursor: 'pointer',
-                padding: '0 2px',
-                fontFamily: 'var(--font-sans)',
-              }}
+              className="agent-clear-btn"
               onClick={handleClear}
             >
               Clear chat
@@ -510,16 +456,16 @@ export default function AgentChat({ profile }: AgentChatProps) {
             id="agent-input"
             className="agent-input"
             type="text"
-            placeholder="Ask about your resume, paste interview questions..."
+            placeholder="Ask about your resume, paste interview ques..."
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
             disabled={loading}
           />
           <button
-            className="btn btn-primary"
+            className="agent-send-btn"
             onClick={handleSend}
-            disabled={loading || !input.trim()}
+            disabled={loading}
           >
             {loading ? '…' : 'Send'}
           </button>
