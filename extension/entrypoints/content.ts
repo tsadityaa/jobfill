@@ -471,8 +471,16 @@ export default defineContentScript({
             let success = false;
             try {
               const element = getElementBySelector(message.selector);
-              if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
-                if (element.value.trim()) {
+              if (element instanceof HTMLElement && (
+                element instanceof HTMLInputElement
+                || element instanceof HTMLTextAreaElement
+                || element.getAttribute('role') === 'textbox'
+                || element.isContentEditable
+              )) {
+                const currentValue = element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement
+                  ? element.value
+                  : element.innerText || element.textContent || '';
+                if (currentValue.trim()) {
                   setQuestionBorderPending(message.selector, false);
                   sendResponse({ type: 'QUESTION_ANSWER_FILLED', success: true });
                   break;
