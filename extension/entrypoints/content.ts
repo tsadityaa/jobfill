@@ -14,7 +14,7 @@
 
 /// <reference types="chrome" />
 
-import { getElementBySelector, hasVisibleFormFields, scanPageFields, extractSanitizedFields } from '../utils/fieldDetector';
+import { getElementBySelector, hasVisibleFormFields, countVisibleFormFields, scanPageFields, extractSanitizedFields, labelStats, beginLabelMemoScope, endLabelMemoScope } from '../utils/fieldDetector';
 import { fillFields, fillQuestionAnswer } from '../utils/formFiller';
 import { detectJobPage } from '../utils/jobPageDetector';
 import { computeFormFingerprint } from '../utils/formFingerprint';
@@ -251,43 +251,80 @@ function injectFile(fileName: string, mimeType: string, dataUrl: string, selecto
   return true;
 }
 
-function waitForFormReady(timeoutMs = 20000): Promise<WaitForFormReadyResponse> {
-  return new Promise((resolve) => {
-    let finished = false;
-    let mutationTimer: ReturnType<typeof setTimeout> | undefined;
-    let quietTimer: ReturnType<typeof setTimeout> | undefined;
-    let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+function isPageActivelyBusy(): boolean {
+  if (document.readyState !== 'complete') return true;
+  const spinners = Array.from(document.querySelectorAll<HTMLElement>(
+    '[aria-busy="true"], [role="progressbar"], .loading-spinner, .spinner, [data-automation-id*="loading"]',
+  ));
+  return spinners.some((spinner) => {
+    const style = getComputedStyle(spinner);
+    return style.display !== 'none' && style.visibility !== 'hidden' && spinner.getClientRects().length > 0;
+  });
+}
 
-    const observer = new MutationObserver(scheduleCheck);
-    const finish = (ready: boolean) => {
-      if (finished) return;
-      finished = true;
-      observer.disconnect();
-      if (mutationTimer) clearTimeout(mutationTimer);
-      if (quietTimer) clearTimeout(quietTimer);
-      if (deadlineTimer) clearTimeout(deadlineTimer);
-      resolve({ type: 'WAIT_FOR_FORM_READY_RESULT', ready });
-    };
-    const check = () => {
-      if (!hasVisibleFormFields()) return;
-      quietTimer = setTimeout(() => {
-        if (hasVisibleFormFields()) finish(true);
-      }, 500);
-    };
-    function scheduleCheck() {
-      if (mutationTimer) clearTimeout(mutationTimer);
-      if (quietTimer) clearTimeout(quietTimer);
-      mutationTimer = setTimeout(check, 150);
+/**
+ * Resolves as soon as visible form fields have stabilized.
+ * Static forms (Greenhouse, Lever, Google Forms) resolve in ~16-50ms.
+ * SPAs (Workday) wait for the field count to stabilize before taking the snapshot.
+ */
+function waitForFormReady(timeoutMs = 4000): Promise<WaitForFormReadyResponse> {
+  return new Promise((resolve) => {
+    // Fast path: if the page already has multiple visible fields and is not busy, resolve immediately
+    const initialCount = countVisibleFormFields();
+    if (initialCount >= 3 && !isPageActivelyBusy()) {
+      return resolve({ type: 'WAIT_FOR_FORM_READY_RESULT', ready: true });
     }
 
-    observer.observe(document.documentElement, {
-      subtree: true,
-      childList: true,
-      attributes: true,
-      attributeFilter: ['class', 'style', 'hidden', 'aria-hidden'],
+    const start = performance.now();
+    let lastCount = initialCount;
+    let lastChange = start;
+    let dirty = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const finish = (ready: boolean) => {
+      observer.disconnect();
+      if (timer) clearTimeout(timer);
+      resolve({ type: 'WAIT_FOR_FORM_READY_RESULT', ready });
+    };
+
+    const observer = new MutationObserver(() => {
+      dirty = true;
     });
-    deadlineTimer = setTimeout(() => finish(false), timeoutMs);
-    scheduleCheck();
+
+    observer.observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['hidden', 'style', 'class', 'aria-hidden'],
+    });
+
+    const tick = () => {
+      const now = performance.now();
+      if (dirty) {
+        dirty = false;
+        const currentCount = countVisibleFormFields();
+        if (currentCount !== lastCount) {
+          lastCount = currentCount;
+          lastChange = now;
+        }
+      }
+
+      const quietWindow = isPageActivelyBusy() ? 300 : 120;
+
+      // Stable: visible fields exist and count hasn't changed for quietWindow ms
+      if (lastCount > 0 && (now - lastChange) >= quietWindow) {
+        return finish(true);
+      }
+
+      // Hard timeout ceiling
+      if (now - start >= timeoutMs) {
+        return finish(lastCount > 0);
+      }
+
+      timer = setTimeout(tick, 40);
+    };
+
+    timer = setTimeout(tick, 40);
   });
 }
 
@@ -358,21 +395,58 @@ export default defineContentScript({
           }
 
           case 'PRESCAN': {
-            // Run regex scan + sanitized field extraction + fingerprint — all synchronous DOM work
-            const fields = scanPageFields();
-            const scanResult: ScanResult = {
-              url: window.location.href,
-              totalFields: fields.length,
-              mappedFields: fields.filter((f) => f.category === 'SAFE_AUTO').length,
-              sensitiveFields: fields.filter((f) => f.category === 'USER_DECISION_REQUIRED').length,
-              unknownFields: fields.filter((f) => f.category === 'UNKNOWN').length,
-              fields,
+            // DEV-only timing (Sub-Task 1 of autofill-speed-profile-cache-plan.md). No behaviour change.
+            const prescanTimings: Record<string, string> | null = import.meta.env.DEV ? {} : null;
+            const markStage = (stage: string, startedAt: number) => {
+              if (!prescanTimings) return;
+              prescanTimings[stage] = `${(performance.now() - startedAt).toFixed(1)}ms, getLabelText calls=${labelStats.calls}, ancestor-walks=${labelStats.ancestorWalks}`;
+              labelStats.calls = 0;
+              labelStats.ancestorWalks = 0;
             };
-            console.log(`[PIPELINE 1] Form scan found ${scanResult.totalFields} fields`);
-            const { sanitizedFields, selectorLookup } = extractSanitizedFields();
+            if (import.meta.env.DEV) {
+              labelStats.calls = 0;
+              labelStats.ancestorWalks = 0;
+            }
+            let stageStart = import.meta.env.DEV ? performance.now() : 0;
 
-            // Fingerprint is async (WebCrypto SHA-256) — use async response
-            computeFormFingerprint().then((fingerprint) => {
+            // Run regex scan + sanitized field extraction + fingerprint — all synchronous DOM work.
+            // The three passes label the same elements, so share one label computation per element.
+            // computeFormFingerprint() is async only for the SHA-256 step; every getLabelText call it
+            // makes happens synchronously before its first await, so the memo scope can safely close
+            // right after the call and never outlives this synchronous block (no stale labels).
+            beginLabelMemoScope();
+            let fields: ReturnType<typeof scanPageFields>;
+            let scanResult: ScanResult;
+            let sanitizedFields: ReturnType<typeof extractSanitizedFields>['sanitizedFields'];
+            let selectorLookup: ReturnType<typeof extractSanitizedFields>['selectorLookup'];
+            let fingerprintPromise: Promise<string>;
+            try {
+              fields = scanPageFields();
+              markStage('scanPageFields', stageStart);
+              scanResult = {
+                url: window.location.href,
+                totalFields: fields.length,
+                mappedFields: fields.filter((f) => f.category === 'SAFE_AUTO').length,
+                sensitiveFields: fields.filter((f) => f.category === 'USER_DECISION_REQUIRED').length,
+                unknownFields: fields.filter((f) => f.category === 'UNKNOWN').length,
+                fields,
+              };
+              console.log(`[PIPELINE 1] Form scan found ${scanResult.totalFields} fields`);
+              if (import.meta.env.DEV) stageStart = performance.now();
+              ({ sanitizedFields, selectorLookup } = extractSanitizedFields());
+              markStage('extractSanitizedFields', stageStart);
+
+              // Fingerprint is async (WebCrypto SHA-256) — use async response
+              if (import.meta.env.DEV) stageStart = performance.now();
+              fingerprintPromise = computeFormFingerprint();
+            } finally {
+              endLabelMemoScope();
+            }
+            fingerprintPromise.then((fingerprint) => {
+              markStage('computeFormFingerprint', stageStart);
+              if (prescanTimings) {
+                console.log(`[JobFill][DEV] PRESCAN timings (${fields.length} fields)`, prescanTimings);
+              }
               lastPrescannedFingerprint = fingerprint;
               console.log(`[JobFill] Pre-scan complete. ${fields.length} fields, fingerprint: ${fingerprint.slice(0, 8)}...`);
               sendResponse({

@@ -75,6 +75,7 @@ export const ALL_INTENT_KEYS: ProfileFieldKey[] = [
   'personal.fullName',
   'personal.dateOfBirth',
   'personal.gender',
+  'personal.nationality',
 
   'contact.primaryPhoneNumber',
   'contact.primaryEmailAddress',

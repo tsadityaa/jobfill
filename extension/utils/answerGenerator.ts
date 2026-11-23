@@ -1,6 +1,6 @@
 import type { UserProfile } from '../types/profile';
 import { isLinkRequestQuestion } from './questionDetector';
-import { requestOpenRouter } from './backendClient';
+import { AI_MODEL, requestAgentRouter } from './backendClient';
 
 export function formatProfileAnswerContext(profile: UserProfile): string {
   const facts = [
@@ -58,15 +58,15 @@ async function selectRelevantMemoryLinks(question: string, memories: string[]): 
   if (availableLinks.length === 0) return '';
 
   if (import.meta.env.DEV) {
-    console.info('[Pipeline 2/5] OpenRouter link-selection request', {
+    console.info('[Pipeline 2/5] Agent Router link-selection request', {
       question,
       memoryCount: memories.length,
       availableLinkCount: availableLinks.length,
     });
   }
 
-  const response = await requestOpenRouter({
-    model: 'openai/gpt-4o-mini',
+  const response = await requestAgentRouter({
+    model: AI_MODEL,
     temperature: 0,
     max_tokens: 300,
     response_format: { type: 'json_object' },
@@ -84,9 +84,9 @@ async function selectRelevantMemoryLinks(question: string, memories: string[]): 
         }),
       },
     ],
-  }, AbortSignal.timeout(30000));
+  }, AbortSignal.timeout(30000), 'profile-link-selection');
 
-  if (!response.ok) throw new Error(`OpenRouter link selection failed (${response.status}).`);
+  if (!response.ok) throw new Error(`Agent Router link selection failed (${response.status}).`);
   const data = await response.json();
   const content = data?.choices?.[0]?.message?.content;
   if (typeof content !== 'string') return '';
@@ -148,36 +148,49 @@ export async function generateApplicationAnswer(question: string, memories: stri
   if (!memories.length && !profileContext.trim()) throw new Error('Add professional skills or experience to your profile before generating answers.');
 
   if (import.meta.env.DEV) {
-    console.info('[Pipeline 2/5] OpenRouter answer request', {
-      model: 'openai/gpt-4o-mini',
-      question,
+    console.info('[Pipeline 2/5] Preparing Agent Router answer', {
       profileFactCount: profileContext.split('\n').filter(Boolean).length,
       profileContextCharacters: profileContext.length,
       memoryCount: memories.length,
       memoryContextCharacters: memories.reduce((total, memory) => total + memory.length, 0),
+      questionCharacters: question.length,
     });
   }
 
-  const response = await requestOpenRouter({
-    model: 'openai/gpt-4o-mini',
+  const wordRange = question.match(/\b(\d{2,4})\s*(?:-|to)\s*(\d{2,4})\s*words?\b/i);
+  const responseRequirements = wordRange
+    ? `Write between ${wordRange[1]} and ${wordRange[2]} words, as requested by the form.`
+    : 'Follow any length and format requirements stated in the question.';
+
+  const response = await requestAgentRouter({
+    model: AI_MODEL,
     messages: [
       {
         role: 'system',
-        content: 'First classify the question. If it asks for a direct personal/profile fact (for example name, contact details, current location/address, current employer/company, date of birth, or graduation year), answer with only the exact requested value found in the supplied profile facts or relevant memories. Do not add first-person wording, explanations, or unrelated facts. Preserve saved addresses and other personal values exactly as stored. For graduation-year questions, return only the explicit four-digit year; for employer questions, return only the company name. Do not infer or invent missing facts; return an empty string if the requested value is unavailable. For open-ended questions (for example why the candidate should be hired), write a concise, specific first-person answer grounded in supplied skills and experience. Do not invent projects, experience, metrics, motivations, or claims; avoid generic filler. CRITICAL: Output ONLY plain text. Do NOT output JSON, code blocks, or key-value structures like {"response":"..."}. Respond directly with the text.',
+        content: 'First classify the question. If it asks for a direct personal/profile fact (for example name, contact details, current location/address, current employer/company, date of birth, or graduation year), answer with only the exact requested value found in the supplied profile facts or relevant memories. Do not add first-person wording, explanations, or unrelated facts. Preserve saved addresses and other personal values exactly as stored. For graduation-year questions, return only the explicit four-digit year; for employer questions, return only the company name. Do not infer or invent missing direct facts; return an empty string only when a requested direct fact is unavailable. For open-ended application questions and essays, do not return an empty answer when relevant profile facts or memories are provided. Write a truthful first-person response grounded in those facts and the details stated in the question. You may express reasonable future hopes as aspirations, but do not invent past experience, projects, metrics, specific program features, or motivations presented as established facts. Follow explicit word-count or formatting requirements in the question; otherwise keep the answer concise. Avoid generic filler. CRITICAL: Output ONLY plain text. Do NOT output JSON, code blocks, or key-value structures like {"response":"..."}. Respond directly with the text.',
       },
       {
         role: 'user',
-        content: JSON.stringify({ question, profileFacts: profileContext, relevantMemories: memories }),
+        content: JSON.stringify({ question, responseRequirements, profileFacts: profileContext, relevantMemories: memories }),
       },
     ],
     temperature: 0.4,
-    max_tokens: 600,
-  }, AbortSignal.timeout(30000));
+    max_tokens: 1500,
+    reasoning_effort: 'low',
+  }, AbortSignal.timeout(75000), 'application-answer');
 
-  if (!response.ok) throw new Error(`OpenRouter request failed (${response.status}).`);
+  if (!response.ok) throw new Error(`Agent Router request failed (${response.status}).`);
   const data = await response.json();
-  const answer = data?.choices?.[0]?.message?.content;
-  return cleanAnswerText(answer);
+  const rawAnswer = data?.choices?.[0]?.message?.content;
+  const answer = cleanAnswerText(rawAnswer);
+  if (import.meta.env.DEV) {
+    console.info('[Pipeline 2/5] Agent Router answer response received', {
+      status: response.status,
+      hasContent: rawAnswer != null,
+      answerCharacters: answer.length,
+    });
+  }
+  return answer;
 }
 
 export interface ApplicationAnswerRequest {
@@ -194,10 +207,10 @@ export async function generateApplicationAnswers(
     return {};
   }
 
-  const response = await requestOpenRouter({
-    model: 'openai/gpt-4o-mini',
+  const response = await requestAgentRouter({
+    model: AI_MODEL,
     temperature: 0.3,
-    max_tokens: 600,
+    max_tokens: 2400,
     response_format: { type: 'json_object' },
     messages: [
       {
@@ -209,9 +222,9 @@ export async function generateApplicationAnswers(
         content: JSON.stringify({ profileFacts: profileContext, questions: requests }),
       },
     ],
-  }, AbortSignal.timeout(30000));
+  }, AbortSignal.timeout(30000), 'application-answer-batch');
 
-  if (!response.ok) throw new Error(`OpenRouter request failed (${response.status}).`);
+  if (!response.ok) throw new Error(`Agent Router request failed (${response.status}).`);
   const data = await response.json();
   const content = data?.choices?.[0]?.message?.content;
   if (typeof content !== 'string') return {};
@@ -229,8 +242,8 @@ export async function extractProfileFieldFromDocuments(
 ): Promise<string | undefined> {
   if (documentEvidence.length === 0) return undefined;
 
-  const response = await requestOpenRouter({
-    model: 'openai/gpt-4o-mini',
+  const response = await requestAgentRouter({
+    model: AI_MODEL,
     temperature: 0,
     max_tokens: 600,
     response_format: { type: 'json_object' },
@@ -244,7 +257,7 @@ export async function extractProfileFieldFromDocuments(
         content: JSON.stringify({ fieldLabel, profileField, documentExcerpts: documentEvidence.map((excerpt) => excerpt.slice(0, 1800)) }),
       },
     ],
-  }, AbortSignal.timeout(15000));
+  }, AbortSignal.timeout(15000), 'document-field-extraction');
 
   if (!response.ok) throw new Error(`Document field extraction failed (${response.status}).`);
   const data = await response.json();

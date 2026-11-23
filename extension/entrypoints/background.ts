@@ -16,7 +16,7 @@
 import { togglePanelInPage, type PanelInjectResult } from '../utils/panelInjector';
 import { mapFieldsWithAI } from '../utils/aiMapper';
 import { ALL_INTENT_KEYS } from '../types/aiMapper';
-import { resolveProfileValue } from '../utils/fieldMapper';
+import { resolveProfileValue, resolveProfileValueForField } from '../utils/fieldMapper';
 import { cloudGetProfile, cloudLoadAllDocumentMetadata, cloudLoadDocumentBlob } from '../utils/cloudStorage';
 import { getCurrentUser } from '../utils/supabase';
 import { searchMemory, syncProfileToMemory } from '../utils/memory';
@@ -32,6 +32,7 @@ import {
   resolveChoiceFromProfile,
   resolveChoicesWithAI,
   resolveOptimisticJobAvailability,
+  resolveRequiredChoiceFallback,
 } from '../utils/choiceResolver';
 import { classifyDocumentField, selectDocumentForUpload } from '../utils/documentMatcher';
 import { appendQuestionTasks, clearQuestionState, getQuestionState, setQuestionAutofillRequested, setQuestionState, updateQuestionTask } from '../utils/questionTaskStore';
@@ -65,6 +66,8 @@ const lastPrescanAtByTab = new Map<number, number>();
 const lastDropdownPipelineAtByTab = new Map<number, number>();
 const pendingGoogleFormFrames = new Map<number, number>();
 const pendingQuestionAutofillTabs = new Map<number, boolean>();
+const processingQuestionTaskKeys = new Set<string>();
+const generatedQuestionAnswers = new Map<string, { answer: Promise<string>; expiresAt: number }>();
 const runningChoiceTabs = new Set<number>();
 const pendingChoiceApplyTabs = new Set<number>();
 const choiceApplyRequestedTabs = new Set<number>();
@@ -170,6 +173,7 @@ const GOOGLE_FORM_INTENT_KEYS: ProfileFieldKey[] = ALL_INTENT_KEYS;
 const GOOGLE_FORM_INTENT_DESCRIPTIONS: Partial<Record<ProfileFieldKey, string>> = {
   'personal.fullName': 'The user\'s complete name (first, middle, and last name combined), especially for single "Name", "Your name", or "Full Name" questions.',
   'personal.gender': 'The applicant\'s gender (e.g., Male, Female, Other, Prefer not to say).',
+  'personal.nationality': 'The applicant\'s nationality or citizenship as a demonym (e.g., Indian, Japanese), derived from their country.',
   'contact.primaryPhoneNumber': 'The applicant\'s primary contact phone number, mobile number, or WhatsApp number with country code.',
   'contact.primaryEmailAddress': 'The applicant\'s primary contact or general email address.',
   'contact.personalEmailAddress': 'The applicant\'s personal email address (e.g. gmail.com).',
@@ -357,6 +361,11 @@ async function fillQuestionTask(tabId: number, task: QuestionTask): Promise<bool
 
     const isSuccess = result?.success === true;
     await updateQuestionTask(tabId, task.fieldId, { status: isSuccess ? 'FILLED' : 'ERROR' });
+    if (isSuccess) {
+      console.info(`[Pipeline 2/5] Filled question task ${task.fieldId} in tab ${tabId}`);
+    } else {
+      console.warn(`[Pipeline 2/5] Generated answer could not be filled into question task ${task.fieldId} in tab ${tabId}`);
+    }
     if (!isSuccess) {
       await chrome.tabs.sendMessage(
         tabId,
@@ -366,9 +375,11 @@ async function fillQuestionTask(tabId: number, task: QuestionTask): Promise<bool
     }
     return isSuccess;
   } catch (error) {
+    const message = error instanceof Error ? error.message : 'Could not reach the question field.';
+    console.error(`[Pipeline 2/5] Fill failed for question task ${task.fieldId} in tab ${tabId}: ${message}`);
     await updateQuestionTask(tabId, task.fieldId, {
       status: 'ERROR',
-      error: error instanceof Error ? error.message : 'Could not reach the question field.',
+      error: message,
     });
     await chrome.tabs.sendMessage(
       tabId,
@@ -419,7 +430,44 @@ async function runQuestionPipeline(
   void processQuestionTasks(tabId, newTasks);
 }
 
+function getGeneratedQuestionAnswer(
+  tabId: number,
+  question: string,
+  memories: string[],
+  profileContext: string,
+): Promise<string> {
+  const normalizedQuestion = question.trim().replace(/\s+/g, ' ').toLowerCase();
+  const key = `${tabId}:${normalizedQuestion}`;
+  const cached = generatedQuestionAnswers.get(key);
+  if (cached && cached.expiresAt > Date.now()) return cached.answer;
+
+  const answer = generateApplicationAnswer(question, memories, profileContext).then((value) => {
+    if (!value.trim()) throw new Error('Agent Router returned an empty answer. Retry the scan or check the Agent Router response.');
+    return value;
+  });
+  const entry = { answer, expiresAt: Date.now() + 120_000 };
+  generatedQuestionAnswers.set(key, entry);
+  void answer.catch(() => {
+    if (generatedQuestionAnswers.get(key) === entry) generatedQuestionAnswers.delete(key);
+  });
+  return answer;
+}
+
 async function processQuestionTasks(tabId: number, tasks: QuestionTask[]): Promise<void> {
+  // The same scan can dispatch a question from more than one pipeline path.
+  // Claim tasks before awaiting profile or memory data so only one AI request
+  // can run for a field at a time.
+  const claimedTasks = tasks.filter((task) => {
+    const key = `${tabId}:${task.selector}`;
+    if (processingQuestionTaskKeys.has(key)) {
+      console.info(`[Pipeline 2/5] Skipping duplicate in-flight question task ${task.fieldId} for tab ${tabId}`);
+      return false;
+    }
+    processingQuestionTaskKeys.add(key);
+    return true;
+  });
+  if (claimedTasks.length === 0) return;
+
   let userId: string | null = null;
   let profileContext = '';
   try {
@@ -433,11 +481,12 @@ async function processQuestionTasks(tabId: number, tasks: QuestionTask[]): Promi
     console.warn(`[JobFill BG] Tab ${tabId}: could not load profile context for question answers`, error);
   }
 
-  await Promise.all(tasks.map(async (task) => {
+  await Promise.all(claimedTasks.map(async (task) => {
+    const taskKey = `${tabId}:${task.selector}`;
     try {
       const memories = userId ? await searchMemory(userId, task.question) : [];
       if (import.meta.env.DEV) {
-        console.info('[Pipeline 2/5] OpenRouter context prepared', {
+        console.info('[Pipeline 2/5] Agent Router context prepared', {
           tabId,
           fieldId: task.fieldId,
           question: task.question,
@@ -446,17 +495,17 @@ async function processQuestionTasks(tabId: number, tasks: QuestionTask[]): Promi
         });
       }
       await updateQuestionTask(tabId, task.fieldId, { status: 'GENERATING' });
-      const answer = await generateApplicationAnswer(task.question, memories, profileContext);
-      if (!answer) throw new Error('No grounded answer was available from saved memories.');
+      const answer = await getGeneratedQuestionAnswer(tabId, task.question, memories, profileContext);
+      if (!answer.trim()) throw new Error('Agent Router returned an empty answer. Retry the scan or check the Agent Router response.');
       await updateQuestionTask(tabId, task.fieldId, { status: 'READY_TO_FILL', answer });
 
       const currentState = await getQuestionState(tabId);
       const isAutofillRequested = currentState?.autofillRequested || pendingQuestionAutofillTabs.get(tabId) === true;
       if (import.meta.env.DEV) {
-        console.info('[Pipeline 2/5] OpenRouter answer ready', {
+        console.info('[Pipeline 2/5] Agent Router answer ready', {
           tabId,
           fieldId: task.fieldId,
-          answer,
+          answerCharacters: answer.length,
           fillGate: isAutofillRequested ? 'user requested fill; filling now' : 'waiting for Scan Current Page',
         });
       }
@@ -465,15 +514,19 @@ async function processQuestionTasks(tabId: number, tasks: QuestionTask[]): Promi
         await fillQuestionTask(tabId, { ...task, answer, status: 'READY_TO_FILL' });
       }
     } catch (error) {
+      const message = error instanceof Error ? error.message : 'Question answer generation failed.';
+      console.error(`[Pipeline 2/5] Question task ${task.fieldId} failed for tab ${tabId}: ${message}`);
       await updateQuestionTask(tabId, task.fieldId, {
         status: 'ERROR',
-        error: error instanceof Error ? error.message : 'Question answer generation failed.',
+        error: message,
       });
       await chrome.tabs.sendMessage(
         tabId,
         { type: 'SET_QUESTION_PENDING', selectors: [task.selector], pending: false },
         { frameId: task.frameId },
       ).catch(() => undefined);
+    } finally {
+      processingQuestionTaskKeys.delete(taskKey);
     }
   }));
 }
@@ -570,7 +623,13 @@ async function runChoicePipeline(tabId: number, frameId: number, url: string): P
 
     for (const control of controls) {
       if (control.multiple) continue;
-      if (!hasSelectedChoice(control)) continue;
+      if (!hasSelectedChoice(control)) {
+        // The page may have been reset after a previous apply. Do not trust
+        // persisted resolved/applied flags when the live control is empty.
+        resolvedIds.delete(control.id);
+        appliedIds.delete(control.id);
+        continue;
+      }
       const selected = control.options.find((option) => option.selected && !option.disabled);
       if (isOverridableChoice(control, selected)) {
         resolvedIds.delete(control.id);
@@ -581,6 +640,7 @@ async function runChoicePipeline(tabId: number, frameId: number, url: string): P
         appliedIds.add(control.id);
       }
     }
+    progress.appliedControlIds = [...appliedIds];
 
     const candidates = controls.filter((control) => !resolvedIds.has(control.id));
     console.info(`[JobFill Choice] Tab ${tabId}: detected ${controls.length} radio/checkbox controls; preparing ${candidates.length} candidates (${resolvedIds.size} already resolved)`, controls.map((control) => ({
@@ -616,7 +676,7 @@ async function runChoicePipeline(tabId: number, frameId: number, url: string): P
       const evidenceByControl = new Map<string, ChoiceEvidence>();
 
       // =========================================================================
-      // STAGE 1: Profile-only Cache Check & OpenRouter Call #1
+      // STAGE 1: Profile-only Cache Check & Agent Router Call #1
       // (NO Supermemory calls upfront — saves time, tokens, and API quota)
       // =========================================================================
       const uncachedCandidates: ChoiceControl[] = [];
@@ -641,15 +701,31 @@ async function runChoicePipeline(tabId: number, frameId: number, url: string): P
         uncachedCandidates.push(control);
       }
 
-      // OpenRouter Call #1: Questions + Profile + Options
+      // Profile-cache decisions are already resolved; apply them immediately
+      // instead of making the user wait for unrelated Supermemory/AI work.
+      if (userWantsApply && decisions.length > 0) {
+        const cachedDecisions = new Map(progress.decisions.map((decision) => [decision.controlId, decision]));
+        for (const decision of decisions) cachedDecisions.set(decision.controlId, decision);
+        progress.decisions = [...cachedDecisions.values()];
+        progress.resolvedControlIds = [...new Set([
+          ...resolvedIds,
+          ...decisions.map((decision) => decision.controlId),
+        ])];
+        progress.applyRequested = true;
+        await saveChoiceProgress(tabId, progress);
+        console.info(`[JobFill Choice] Tab ${tabId}: ⚡ applying ${decisions.length} profile-cache decisions immediately`);
+        await applyPreparedChoiceDecisions(tabId, frameId, progress);
+      }
+
+      // Agent Router Call #1: Questions + Profile + Options
       if (uncachedCandidates.length) {
         const aiRequests1 = uncachedCandidates.map((control) => ({
           control,
           evidence: evidenceByControl.get(control.id)!,
         }));
-        console.info(`[JobFill Choice] Tab ${tabId}: 🚀 OpenRouter Call #1 (Questions + Profile + Options) for ${aiRequests1.length} controls (no Supermemory)`, aiRequests1.map(({ control }) => ({ id: control.id, question: control.question })));
+        console.info(`[JobFill Choice] Tab ${tabId}: 🚀 Agent Router Call #1 (Questions + Profile + Options) for ${aiRequests1.length} controls (no Supermemory)`, aiRequests1.map(({ control }) => ({ id: control.id, question: control.question })));
         const aiDecisions1 = await resolveChoicesWithAI(aiRequests1, { stage: 'call1' });
-        console.info(`[JobFill Choice] Tab ${tabId}: OpenRouter Call #1 resolved ${aiDecisions1.length}/${aiRequests1.length} controls`, aiDecisions1.map((d) => ({ controlId: d.controlId, selectedOptionIds: d.selectedOptionIds, confidence: d.confidence })));
+        console.info(`[JobFill Choice] Tab ${tabId}: Agent Router Call #1 resolved ${aiDecisions1.length}/${aiRequests1.length} controls`, aiDecisions1.map((d) => ({ controlId: d.controlId, selectedOptionIds: d.selectedOptionIds, confidence: d.confidence })));
 
         for (const decision of aiDecisions1) {
           const control = uncachedCandidates.find((item) => item.id === decision.controlId);
@@ -708,7 +784,7 @@ async function runChoicePipeline(tabId: number, frameId: number, url: string): P
         })));
 
         // =========================================================================
-        // STAGE 3: OpenRouter Call #2 (Remaining Questions + Profile + Memories + Options)
+        // STAGE 3: Agent Router Call #2 (Remaining Questions + Profile + Memories + Options)
         // =========================================================================
         const aiRequests2: Array<{ control: ChoiceControl; evidence: ChoiceEvidence }> = [];
         for (const control of unresolvedCandidates) {
@@ -735,9 +811,9 @@ async function runChoicePipeline(tabId: number, frameId: number, url: string): P
         }
 
         if (aiRequests2.length) {
-          console.info(`[JobFill Choice] Tab ${tabId}: 🚀 OpenRouter Call #2 (Remaining Questions + Profile + Memories + Options) for ${aiRequests2.length} controls`, aiRequests2.map(({ control }) => ({ id: control.id, question: control.question })));
+          console.info(`[JobFill Choice] Tab ${tabId}: 🚀 Agent Router Call #2 (Remaining Questions + Profile + Memories + Options) for ${aiRequests2.length} controls`, aiRequests2.map(({ control }) => ({ id: control.id, question: control.question })));
           const aiDecisions2 = await resolveChoicesWithAI(aiRequests2, { stage: 'call2' });
-          console.info(`[JobFill Choice] Tab ${tabId}: OpenRouter Call #2 resolved ${aiDecisions2.length}/${aiRequests2.length} controls`, aiDecisions2.map((d) => ({ controlId: d.controlId, selectedOptionIds: d.selectedOptionIds, confidence: d.confidence })));
+          console.info(`[JobFill Choice] Tab ${tabId}: Agent Router Call #2 resolved ${aiDecisions2.length}/${aiRequests2.length} controls`, aiDecisions2.map((d) => ({ controlId: d.controlId, selectedOptionIds: d.selectedOptionIds, confidence: d.confidence })));
           for (const decision of aiDecisions2) {
             const control = unresolvedCandidates.find((item) => item.id === decision.controlId);
             const evidence = evidenceByControl.get(decision.controlId);
@@ -787,6 +863,18 @@ async function runChoicePipeline(tabId: number, frameId: number, url: string): P
             continue;
           }
 
+          const requiredDecision = resolveRequiredChoiceFallback(control);
+          if (requiredDecision) {
+            decisions.push(requiredDecision);
+            finalDecisionIds.add(control.id);
+            console.warn(`[JobFill Choice] Tab ${tabId}: ${control.id} required field had no evidence; applying conservative option fallback`, {
+              question: control.question,
+              selectedOptionIds: requiredDecision.selectedOptionIds,
+              confidence: requiredDecision.confidence,
+            });
+            continue;
+          }
+
           console.warn(`[JobFill Choice] Tab ${tabId}: ${control.id} could not be resolved by AI (Call #1, Call #2) or fallbacks`, { question: control.question });
         }
 
@@ -807,6 +895,15 @@ async function runChoicePipeline(tabId: number, frameId: number, url: string): P
           }
         }
       }
+
+      const storedDecisions = new Map(progress.decisions.map((decision) => [decision.controlId, decision]));
+      for (const decision of decisions) storedDecisions.set(decision.controlId, decision);
+      progress.decisions = [...storedDecisions.values()];
+      progress.resolvedControlIds = [...new Set([
+        ...resolvedIds,
+        ...progress.decisions.map((decision) => decision.controlId),
+      ])];
+      await saveChoiceProgress(tabId, progress);
 
       console.info(`[JobFill Choice] Tab ${tabId}: ✅ prepared and stored ${decisions.length} total decisions`, {
         decisions: decisions.map((d) => {
@@ -878,15 +975,13 @@ async function runDropdownPipeline(tabId: number, frameId: number): Promise<void
 
     const mappingDeadline = Date.now() + 60000;
     let tabResult = await getTabResult(tabId);
-    if (tabResult?.status === 'running') {
-      console.info(`[JobFill Dropdown] Tab ${tabId}: waiting for pre-scan mapping to finish before scanning dropdowns`);
-    }
-    while (tabResult?.status === 'running' && Date.now() < mappingDeadline) {
-      await new Promise((resolve) => setTimeout(resolve, 250));
+    // Only wait for DOM PRESCAN to produce scanResult — do NOT block on slow LLM/AI calls!
+    while ((!tabResult || (tabResult.status === 'running' && !tabResult.scanResult)) && Date.now() < mappingDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
       tabResult = await getTabResult(tabId);
     }
-    if (tabResult?.status === 'running') {
-      console.warn(`[JobFill Dropdown] Tab ${tabId}: mapping is still running after 60 seconds; skipping dropdown scan`);
+    if (!tabResult || (tabResult.status === 'running' && !tabResult.scanResult)) {
+      console.warn(`[JobFill Dropdown] Tab ${tabId}: form scan is still running after timeout; skipping dropdown scan`);
       return;
     }
 
@@ -1178,11 +1273,13 @@ async function fillLateProfileMappings(tabId: number, frameId: number): Promise<
     const profile = await cloudGetProfile();
     const userId = (await getCurrentUser())?.id ?? null;
     const mappings = await Promise.all(profileMappings.map(async (mapping) => {
-      const profileValue = mapping.value || resolveProfileValue(profile, mapping.profileField);
+      const field = result.scanResult!.fields.find((item) => item.selector === mapping.selector);
+      const profileValue = mapping.value || (field
+        ? resolveProfileValueForField(profile, field, mapping.profileField)
+        : resolveProfileValue(profile, mapping.profileField));
       if (profileValue?.trim()) return { ...mapping, value: profileValue };
       if (!isGoogleFormsUrl(result.scanResult!.url) || !userId) return null;
 
-      const field = result.scanResult!.fields.find((item) => item.selector === mapping.selector);
       const label = field?.attributes.labelText || field?.attributes.ariaLabel || mapping.profileField;
       const evidence = await searchMemory(userId, `${mapping.profileField} ${label}`);
       let documentValue: string | undefined;
@@ -1305,6 +1402,22 @@ async function runPrescanPipeline(tabId: number, googleFormsFrameId?: number): P
       });
     }
 
+    // Immediately persist the local pre-scan result so the popup can fill local fields without waiting for AI
+    await setTabResult({
+      tabId,
+      scanResult,
+      aiMappings: [],
+      aiMappedCount: 0,
+      aiMappingComplete: false,
+      googleFormMappingVersion: isGoogleForm ? GOOGLE_FORM_MAPPING_VERSION : undefined,
+      status: 'running',
+      fingerprint,
+    });
+    if (scanResult.mappedFields > 0) {
+      chrome.action.setBadgeText({ text: String(scanResult.mappedFields), tabId });
+      chrome.action.setBadgeBackgroundColor({ color: '#8b5cf6', tabId });
+    }
+
     if (isGoogleForm) await clearQuestionState(tabId);
     else await runQuestionPipeline(tabId, frameId, scanResult.url, scanResult.fields);
     void runChoicePipeline(tabId, frameId, scanResult.url);
@@ -1313,15 +1426,6 @@ async function runPrescanPipeline(tabId: number, googleFormsFrameId?: number): P
     } catch (error) {
       console.warn(`[JobFill BG] Tab ${tabId}: file upload pipeline setup failed`, error);
     }
-    await setTabResult({
-      tabId,
-      scanResult,
-      aiMappings: [],
-      aiMappedCount: 0,
-      aiMappingComplete: false,
-      status: 'running',
-      fingerprint,
-    });
 
     let profile: UserProfile | undefined;
     try {
@@ -1342,7 +1446,7 @@ async function runPrescanPipeline(tabId: number, googleFormsFrameId?: number): P
       if (isAlreadyFilled(field)) return false;
       if ((field.category === 'UNKNOWN' || field.category === 'APPLICATION_QUESTION') && !cachedSelectors.has(field.selector)) return true;
       if (field.category !== 'SAFE_AUTO' || !field.profileField || cachedSelectors.has(field.selector)) return false;
-      return !profile || !resolveProfileValue(profile, field.profileField)?.trim();
+      return !profile || !resolveProfileValueForField(profile, field)?.trim();
     });
     if (cached && !hasUnmappedFallbackField && (!isGoogleForm || (cached.googleFormMappingVersion === GOOGLE_FORM_MAPPING_VERSION && cached.aiMappingComplete))) {
       console.log(`[JobFill BG] Tab ${tabId}: fingerprint cache HIT (${fingerprint.slice(0, 8)}...) — no AI needed`);
@@ -1385,38 +1489,68 @@ async function runPrescanPipeline(tabId: number, googleFormsFrameId?: number): P
       //   }
       // }
 
+      // A complete cached AI result for this exact form structure means the AI already answered
+      // everything it could. Reuse it instead of calling the AI on every visit. Fields the AI could
+      // not map still go to the question pipeline below, exactly as on the first visit.
+      const gfCacheUsable = Boolean(cached
+        && cached.googleFormMappingVersion === GOOGLE_FORM_MAPPING_VERSION
+        && cached.aiMappingComplete);
+      const cachedGfMappings: FieldMapping[] = [];
+      if (gfCacheUsable && cached) {
+        const gfFileSelectors = new Set(scanResult.fields
+          .filter((field) => field.category === 'FILE_UPLOAD')
+          .map((field) => field.selector));
+        for (const mapping of cached.aiMappings) {
+          if (gfFileSelectors.has(mapping.selector)) continue;
+          const field = scanResult.fields.find((item) => item.selector === mapping.selector);
+          if (!field) continue;
+          field.profileField = mapping.profileField;
+          field.category = 'SAFE_AUTO';
+          field.confidence = mapping.confidence;
+          cachedGfMappings.push(mapping);
+        }
+      }
+      const cachedGfSelectors = new Set(cachedGfMappings.map((mapping) => mapping.selector));
+
       const fallbackSelectors = new Set(scanResult.fields.flatMap((field) => {
+        if (cachedGfSelectors.has(field.selector)) return [];
         if (isAlreadyFilled(field)) return [];
         if (field.category === 'APPLICATION_QUESTION') return [field.selector];
         if (field.category === 'UNKNOWN') return [field.selector];
         if (field.category !== 'SAFE_AUTO' || !field.profileField) return [];
-        const value = profile ? resolveProfileValue(profile, field.profileField) : undefined;
+        const value = profile ? resolveProfileValueForField(profile, field) : undefined;
         return field.confidence >= 0.85 && value?.trim() ? [] : [field.selector];
       }));
       const aiCandidates = getGoogleFormAICandidates(sanitizedFields, selectorLookup, fallbackSelectors);
-      let aiMappings: FieldMapping[] = [];
-      let aiMappedCount = 0;
-      let aiMappingComplete = aiCandidates.fields.length === 0;
+      let aiMappings: FieldMapping[] = [...cachedGfMappings];
+      let aiMappedCount = aiMappings.length;
+      let aiMappingComplete = gfCacheUsable || aiCandidates.fields.length === 0;
 
       if (aiCandidates.fields.length > 0 && aiCandidates.intentKeys.length > 0) {
         try {
-          console.info(`[JobFill BG] Tab ${tabId}: sending ${aiCandidates.fields.length} unmapped, low-confidence, or empty-value Google Forms fields to AI`, aiCandidates.fields.map((field) => field.label));
-          const aiResponse = await mapFieldsWithAI(aiCandidates.fields, {
-            googleForm: true,
-            allowedIntentKeys: aiCandidates.intentKeys,
-            intentDescriptions: GOOGLE_FORM_INTENT_DESCRIPTIONS,
-            timeoutMs: 15000,
-          });
+          if (!gfCacheUsable) {
+            console.info(`[JobFill BG] Tab ${tabId}: sending ${aiCandidates.fields.length} unmapped, low-confidence, or empty-value Google Forms fields to AI`, aiCandidates.fields.map((field) => field.label));
+          }
+          const aiResponse: Awaited<ReturnType<typeof mapFieldsWithAI>> = gfCacheUsable
+            ? { mappings: {}, completed: true }
+            : await mapFieldsWithAI(aiCandidates.fields, {
+              googleForm: true,
+              allowedIntentKeys: aiCandidates.intentKeys,
+              intentDescriptions: GOOGLE_FORM_INTENT_DESCRIPTIONS,
+              timeoutMs: 15000,
+            });
           aiMappingComplete = aiResponse.completed === true;
 
           for (const [fieldId, profileField] of Object.entries(aiResponse.mappings)) {
             const selector = selectorLookup[fieldId];
             if (!selector) continue;
-            const value = profile ? resolveProfileValue(profile, profileField) : undefined;
+            const mappedField = scanResult.fields.find((field) => field.selector === selector);
+            const value = profile && mappedField
+              ? resolveProfileValueForField(profile, mappedField, profileField)
+              : profile ? resolveProfileValue(profile, profileField) : undefined;
             if (!value?.trim()) continue;
 
             aiMappings.push({ selector, profileField, value, confidence: 0.75 });
-            const mappedField = scanResult.fields.find((field) => field.selector === selector);
             if (mappedField) {
               mappedField.profileField = profileField;
               mappedField.category = 'SAFE_AUTO';
@@ -1528,7 +1662,7 @@ async function runPrescanPipeline(tabId: number, googleFormsFrameId?: number): P
       if (isAlreadyFilled(field)) return [];
       if (field.category === 'UNKNOWN' || field.category === 'APPLICATION_QUESTION') return [field.selector];
       if (field.category !== 'SAFE_AUTO' || !field.profileField) return [];
-      const value = profile ? resolveProfileValue(profile, field.profileField) : undefined;
+      const value = profile ? resolveProfileValueForField(profile, field) : undefined;
       return value?.trim() ? [] : [field.selector];
     }));
     let aiMappings: FieldMapping[] = [];
@@ -1548,14 +1682,16 @@ async function runPrescanPipeline(tabId: number, googleFormsFrameId?: number): P
           const selector = selectorLookup[candidate.fieldId];
           if (!selector) continue;
           const profileField = aiResponse.mappings[candidate.fieldId];
-          const value = profileField && profile ? resolveProfileValue(profile, profileField) : undefined;
+          const mappedField = scanResult.fields.find((field) => field.selector === selector);
+          const value = profileField && profile && mappedField
+            ? resolveProfileValueForField(profile, mappedField, profileField)
+            : profileField && profile ? resolveProfileValue(profile, profileField) : undefined;
           if (profileField && value?.trim()) {
             aiMappings.push({ selector, profileField, value, confidence: 0.75 });
-            const field = scanResult.fields.find((item) => item.selector === selector);
-            if (field) {
-              field.profileField = profileField;
-              field.category = 'SAFE_AUTO';
-              field.confidence = 0.75;
+            if (mappedField) {
+              mappedField.profileField = profileField;
+              mappedField.category = 'SAFE_AUTO';
+              mappedField.confidence = 0.75;
             }
             continue;
           }

@@ -1,7 +1,7 @@
 import type { UserProfile } from '../types/profile';
 import { classifyDegree, pickEducation } from './educationPicker';
 import type { ChoiceControl, ChoiceDecision, ChoiceEvidence, ChoiceOption } from '../types/choice';
-import { isBackendConfigured, requestOpenRouter } from './backendClient';
+import { AI_MODEL, isBackendConfigured, requestAgentRouter } from './backendClient';
 
 const CHOICE_CACHE_KEY = 'jf_choice_decisions_v8';
 const CHOICE_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
@@ -22,6 +22,37 @@ function normalize(value: string): string {
     .replace(/[^a-z0-9+#.]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function isRequiredChoice(question: string): boolean {
+  return /\*|\b(?:required|mandatory)\b/i.test(question);
+}
+
+function requiredChoiceFallback(options: ChoiceOption[]): ChoiceOption | undefined {
+  const enabled = options.filter((option) => !option.disabled && !isPlaceholderOption(option));
+  const conservative = enabled.find((option) => /\b(?:prefer not to say|decline to (?:answer|state|identify)|not sure|unsure|unknown|maybe|none|n\/a|not applicable)\b/i.test(option.label));
+  if (conservative) return conservative;
+
+  const negative = enabled.find((option) => /^(?:no|none|not really|neither|none of the above)$/i.test(option.label.trim()));
+  if (negative) return negative;
+
+  const numeric = enabled
+    .map((option) => ({ option, value: Number(option.label.trim()) }))
+    .filter(({ value }) => Number.isFinite(value));
+  if (numeric.length) return numeric.sort((a, b) => a.value - b.value)[0].option;
+  return enabled[0] ?? options.find((option) => !option.disabled);
+}
+
+export function resolveRequiredChoiceFallback(control: ChoiceControl): ChoiceDecision | null {
+  if (!isRequiredChoice(control.question)) return null;
+  const option = requiredChoiceFallback(control.options);
+  if (!option) return null;
+  return {
+    controlId: control.id,
+    selectedOptionIds: [option.id],
+    confidence: 0.25,
+    source: 'user_preference',
+  };
 }
 
 export function inferDegreeLevel(degree: string): string {
@@ -551,38 +582,20 @@ export async function resolveChoicesWithAI(
     control.options.filter((option) => !option.disabled),
   );
 
-  console.info(`[JobFill Choice AI] [${stageLabel}] sending ${available.length} controls to OpenRouter (index-based)`, available.map(({ control, evidence }, qi) => ({
-    questionIndex: qi,
-    question: control.question,
-    optionCount: enabledOptionsByQuestion[qi].length,
-    profileFactCount: evidence.profileFacts.length,
-    memoryCount: evidence.memories.length,
-    formAnswerCount: evidence.formAnswers.length,
-  })));
-
-  if (stage === 'call2') {
-    console.info(`[JobFill Choice AI] [${stageLabel}] Supermemory memories retrieved for questions:`, available.map(({ control, evidence }, qi) => ({
-      questionIndex: qi,
-      question: control.question,
-      options: enabledOptionsByQuestion[qi].map((o) => o.label),
-      memoryCount: evidence.memories.length,
-      memoriesFromSupermemory: evidence.memories,
-    })));
-  }
-
   const stageInstruction = stage === 'call1'
     ? `
 CRITICAL STAGE #1 INSTRUCTION (PROFILE-ONLY FAST RESOLUTION):
 - This is Call #1. You are evaluating questions using the applicant's profile facts, work/education timeline, skills, screening stances, and options WITHOUT external memories.
 - If a question CANNOT be confidently and factually answered from the profile evidence (e.g. requires specific project details, external society memberships like IEEE/ACM, certifications, or past achievements not mentioned in the profile):
-  DO NOT GUESS. Either omit the question from results or return an empty selection "s": [] with confidence: 0.
-  These unanswered questions will be automatically routed to a secondary retrieval stage (Supermemory) in Call #2.`
+  For OPTIONAL questions, omit the question so it can be checked with Supermemory in Call #2.
+- For REQUIRED questions (marked by "required": true), always return a valid listed option key. Make the most conservative best-effort choice from the available options when facts are missing; use low confidence to indicate uncertainty. Never invent free-text evidence.`
     : `
 CRITICAL STAGE #2 INSTRUCTION (DEEP MEMORY RESOLUTION):
 - This is Call #2. These are the remaining questions that could not be resolved from the profile alone.
 - Each question now contains "mem" (relevant retrieved memories from Supermemory).
 - Carefully inspect both the top-level "profile" and the per-question "mem" chunks to answer accurately.
-- If IEEE, certifications, or specific experiences are confirmed in "mem", select the corresponding option. If still absent anywhere, select the appropriate negative option ("No", "None", etc.) or omit.`;
+- If IEEE, certifications, or specific experiences are confirmed in "mem", select the corresponding option.
+- For REQUIRED questions, always return a valid listed option key even if the evidence is incomplete. Prefer a neutral/unknown option, then the conservative answer supported by available evidence; indicate uncertainty with low confidence. Never return an empty selection for a required control.`;
 
   const systemPrompt = `You are an expert AI job-application assistant that accurately selects the right choices (radio buttons, checkboxes, dropdown selects) for job application forms on behalf of the applicant.
 Analyze the applicant's profile facts, relevant retrieved memories from Supermemory, and answers from the same form.
@@ -595,6 +608,7 @@ The user message is a JSON object with:
   - "i": question index (0-based)
   - "q": the question text
   - "type": "radio", "checkbox", or "select"
+  - "required": true when the question is marked required
   - "multi": true if multiple selections are allowed, false for single-choice radio buttons or dropdowns
   - "opts": array of strings formatted "oN: label". "oN" is the option KEY you must return in "s". Labels may themselves be numbers (e.g. "o3: 4" means key "o3", label "4") — always return the key, never the label text or a bare number.
   - "mem": relevant memories from Supermemory (may be empty)
@@ -693,8 +707,9 @@ Perform strict, precise mental arithmetic and calendar math using "system: Curre
 CONSTRAINTS:
 - Single-choice (multi=false): select EXACTLY ONE index.
 - Multi-choice (multi=true): select ALL matching indices.
+- Required controls must never have an empty selection. For an uncertain required control, select the safest available option and report low confidence rather than leaving it unanswered.
 - Standalone single checkboxes (consent, agreement): return the option index so it gets checked.
-- Confidence < ${stage === 'call1' ? '0.70' : '0.65'} means uncertain — prefer omitting the question or returning empty "s".`;
+- For OPTIONAL controls only, confidence < ${stage === 'call1' ? '0.70' : '0.65'} means uncertain — prefer omitting the question or returning empty "s".`;
 
   // Build the compact payload: profile once + numbered questions with label-only options
   const sharedProfileFacts = available[0].evidence.profileFacts;
@@ -706,23 +721,16 @@ CONSTRAINTS:
       q: control.question,
       type: control.kind,
       multi: control.multiple,
+      required: isRequiredChoice(control.question),
       opts: enabledOptionsByQuestion[qi].map((o, n) => `o${n}: ${o.label}`),
       ...(evidence.memories.length ? { mem: evidence.memories } : {}),
       ...(evidence.formAnswers.length ? { form: evidence.formAnswers } : {}),
     })),
   };
 
-  console.info(`[JobFill Choice AI] [${stageLabel}] Full System Prompt Text (Lines 555-635):\n${systemPrompt}`);
-  console.info(`[JobFill Choice AI] [${stageLabel}] Full prompt payload given to OpenRouter:`, {
-    model: 'openai/gpt-4o-mini',
-    stage,
-    systemPromptLength: systemPrompt.length,
-    userPayload,
-  });
-
   try {
-    const response = await requestOpenRouter({
-      model: 'openai/gpt-4o-mini',
+    const response = await requestAgentRouter({
+      model: AI_MODEL,
       temperature: 0,
       max_tokens: 1500,
       response_format: { type: 'json_object' },
@@ -730,7 +738,7 @@ CONSTRAINTS:
         { role: 'system', content: systemPrompt },
         { role: 'user', content: JSON.stringify(userPayload) },
       ],
-    }, AbortSignal.timeout(45000));
+    }, AbortSignal.timeout(45000), stage === 'call1' ? 'choice-call1' : 'choice-call2');
     if (!response.ok) {
       console.warn(`[JobFill Choice AI] API returned HTTP ${response.status}: ${response.statusText}`);
       return [];
@@ -738,14 +746,17 @@ CONSTRAINTS:
     const data = await response.json();
     const content = data?.choices?.[0]?.message?.content;
     if (typeof content !== 'string') {
-      console.warn('[JobFill Choice AI] unexpected API response structure', { data });
+      console.warn('[JobFill Choice AI] response had no text content');
       return [];
     }
-    console.info(`[JobFill Choice AI] [${stageLabel}] raw AI response content:`, content);
+    console.info(`[JobFill Choice AI] [${stageLabel}] response received`, { contentCharacters: content.length });
     const parsed = JSON.parse(content.replace(/^```(?:json)?\s*|\s*```$/g, '')) as {
       results?: Array<{ i?: number; s?: Array<string | number>; c?: number; ot?: string }>;
     };
-    console.info(`[JobFill Choice AI] [${stageLabel}] parsed AI results:`, parsed.results);
+    console.info(`[JobFill Choice AI] [${stageLabel}] parsed response`, {
+      resultCount: parsed.results?.length ?? 0,
+      selectedOptionCount: parsed.results?.reduce((count, result) => count + (Array.isArray(result.s) ? result.s.length : 0), 0) ?? 0,
+    });
 
     const minConfidence = stage === 'call1' ? 0.70 : 0.65;
 
@@ -757,10 +768,11 @@ CONSTRAINTS:
       }
       const request = available[qi];
       const enabledOpts = enabledOptionsByQuestion[qi];
-      const rawIndices = Array.isArray(result.s) ? [...new Set(result.s)] : [];
+      let rawIndices = Array.isArray(result.s) ? [...new Set(result.s)] : [];
       const confidence = typeof result.c === 'number' ? result.c : 0;
+      const required = isRequiredChoice(request.control.question);
 
-      if (confidence < minConfidence || !rawIndices.length) {
+      if ((confidence < minConfidence || !rawIndices.length) && !required) {
         console.info(`[JobFill Choice AI] [${stageLabel}] filtering out result:`, {
           questionIndex: qi,
           question: request.control.question,
@@ -779,6 +791,20 @@ CONSTRAINTS:
           selectedIds.push(opt.id);
         } else if (!opt) {
           console.warn('[JobFill Choice AI] invalid option key, skipping:', { questionIndex: qi, value: raw, totalOptions: enabledOpts.length });
+        }
+      }
+
+      let usedRequiredFallback = false;
+      if (!selectedIds.length && required) {
+        const fallback = requiredChoiceFallback(enabledOpts);
+        if (fallback) {
+          selectedIds.push(fallback.id);
+          rawIndices = [`o${enabledOpts.indexOf(fallback)}`];
+          usedRequiredFallback = true;
+          console.warn('[JobFill Choice AI] required control had no valid model selection; using conservative option fallback', {
+            question: request.control.question,
+            selectedLabel: fallback.label,
+          });
         }
       }
 
@@ -824,7 +850,7 @@ CONSTRAINTS:
         controlId: request.control.id,
         selectedOptionIds: finalSelectedIds,
         confidence,
-        source: 'ai' as const,
+        source: usedRequiredFallback ? 'user_preference' as const : 'ai' as const,
         ...(otherText ? { otherText } : {}),
       }];
     });

@@ -247,157 +247,11 @@ export default function DocumentCard({
       />
 
       {isActive ? (
-        /* ================= ACTIVE STATE WITH RADIAL MENU ================= */
-        <div className="doc-card-v3-active-body">
-          {/* Left: Radial Cluster */}
-          <div className="doc-radial-cluster" onClick={(e) => e.stopPropagation()}>
-            {/* Background Multi-tier Glowing Neon Arc + Circuit Connectors */}
-            <svg className="doc-radial-arc-svg" viewBox="0 0 136 104">
-              <defs>
-                <linearGradient id="neonArcGradient" x1="0%" y1="100%" x2="100%" y2="100%">
-                  <stop offset="0%" stopColor="#00d4ff" stopOpacity="0.4" />
-                  <stop offset="25%" stopColor="#00d4ff" stopOpacity="0.95" />
-                  <stop offset="50%" stopColor="#e0f9ff" stopOpacity="1" />
-                  <stop offset="75%" stopColor="#00d4ff" stopOpacity="0.95" />
-                  <stop offset="100%" stopColor="#00d4ff" stopOpacity="0.4" />
-                </linearGradient>
-
-                <filter id="neonBeamGlow" x="-50%" y="-50%" width="200%" height="200%">
-                  <feGaussianBlur in="SourceGraphic" stdDeviation="1.5" result="sharpBlur" />
-                  <feGaussianBlur in="SourceGraphic" stdDeviation="4.5" result="wideBlur" />
-                  <feMerge>
-                    <feMergeNode in="wideBlur" />
-                    <feMergeNode in="sharpBlur" />
-                    <feMergeNode in="SourceGraphic" />
-                  </feMerge>
-                </filter>
-
-                <filter id="connectorGlow" x="-50%" y="-50%" width="200%" height="200%">
-                  <feGaussianBlur in="SourceGraphic" stdDeviation="1.2" />
-                </filter>
-              </defs>
-
-              {/* Circuit connector lines: each button → center (68, 70) */}
-              {/* Download (68, 18) → center */}
-              <line x1="68" y1="32" x2="68" y2="48" stroke="#00d4ff" strokeWidth="0.6" strokeOpacity="0.35" strokeDasharray="2 2" filter="url(#connectorGlow)" />
-              {/* Preview (22, 28) → center */}
-              <line x1="28" y1="42" x2="48" y2="58" stroke="#00d4ff" strokeWidth="0.6" strokeOpacity="0.3" strokeDasharray="2 2" filter="url(#connectorGlow)" />
-              {/* Replace (114, 28) → center */}
-              <line x1="108" y1="42" x2="88" y2="58" stroke="#00d4ff" strokeWidth="0.6" strokeOpacity="0.3" strokeDasharray="2 2" filter="url(#connectorGlow)" />
-              {/* Delete (16, 72) → center */}
-              <line x1="30" y1="78" x2="48" y2="72" stroke="#ff4455" strokeWidth="0.5" strokeOpacity="0.25" strokeDasharray="2 2" filter="url(#connectorGlow)" />
-              {/* Edit (122, 72) → center */}
-              <line x1="108" y1="78" x2="88" y2="72" stroke="#00d4ff" strokeWidth="0.6" strokeOpacity="0.3" strokeDasharray="2 2" filter="url(#connectorGlow)" />
-
-              {/* Ambient glow track */}
-              <path
-                d="M 15 70 C 18 36, 42 6, 68 6 C 94 6, 118 36, 121 70"
-                fill="none"
-                stroke="#00d4ff"
-                strokeWidth="3.5"
-                strokeOpacity="0.2"
-                filter="url(#neonBeamGlow)"
-              />
-
-              {/* Core electric laser beam */}
-              <path
-                className="doc-radial-arc-beam"
-                d="M 15 70 C 18 36, 42 6, 68 6 C 94 6, 118 36, 121 70"
-                fill="none"
-                stroke="url(#neonArcGradient)"
-                strokeWidth="1.8"
-                filter="url(#neonBeamGlow)"
-              />
-            </svg>
-
-            {/* Center: Document / Image Thumbnail */}
-            <div className="doc-radial-thumb" onClick={() => setIsActive(false)}>
-              {renderThumbnail(true)}
-            </div>
-
-            {/* Button 1: Download (Top Center) */}
-            <div className="doc-radial-item doc-radial-item--download">
-              <button
-                className="doc-radial-btn doc-radial-btn--hero"
-                title="Download"
-                onClick={(e) => handleAction(e, () => onDownload(doc))}
-              >
-                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                  <polyline points="7 10 12 15 17 10" />
-                  <line x1="12" y1="15" x2="12" y2="3" />
-                </svg>
-              </button>
-              <span className="doc-radial-label">Download</span>
-            </div>
-
-            {/* Button 2: Preview (Upper Left) */}
-            <div className="doc-radial-item doc-radial-item--preview">
-              <button
-                className="doc-radial-btn"
-                title="Preview"
-                onClick={(e) => handleAction(e, () => onPreview(doc))}
-              >
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
-                  <circle cx="12" cy="12" r="3" />
-                </svg>
-              </button>
-              <span className="doc-radial-label">Preview</span>
-            </div>
-
-            {/* Button 3: Replace (Upper Right) */}
-            <div className="doc-radial-item doc-radial-item--replace">
-              <button
-                className="doc-radial-btn"
-                title="Replace file"
-                onClick={handleReplaceClick}
-              >
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                  <polyline points="17 1 21 5 17 9" />
-                  <path d="M3 11V9a4 4 0 0 1 4-4h14" />
-                  <polyline points="7 23 3 19 7 15" />
-                  <path d="M21 13v2a4 4 0 0 1-4 4H3" />
-                </svg>
-              </button>
-              <span className="doc-radial-label">Replace</span>
-            </div>
-
-            {/* Button 4: Delete (Lower Left - with red ring) */}
-            <div className="doc-radial-item doc-radial-item--delete">
-              <div className="doc-radial-ring--danger">
-                <button
-                  className="doc-radial-btn doc-radial-btn--danger"
-                  title="Delete document"
-                  onClick={(e) => handleAction(e, () => onDelete(doc))}
-                >
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                    <polyline points="3 6 5 6 21 6" />
-                    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                  </svg>
-                </button>
-              </div>
-              <span className="doc-radial-label">Delete</span>
-            </div>
-
-            {/* Button 5: Edit (Lower Right) */}
-            <div className="doc-radial-item doc-radial-item--edit">
-              <button
-                className="doc-radial-btn"
-                title="Edit / Process"
-                onClick={handleEditClick}
-              >
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
-                  <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
-                </svg>
-              </button>
-              <span className="doc-radial-label">Edit</span>
-            </div>
-          </div>
-
-          {/* Right: Active Document Details */}
-          <div className="doc-card-v3-details">
+        /* ================= ACTIVE STATE WITH DOCUMENT TOOLBAR ================= */
+        <div className="doc-card-v3-expanded">
+          <div className="doc-card-v3-expanded-header">
+            <div className="doc-card-v3-expanded-thumb">{renderThumbnail(false)}</div>
+            <div className="doc-card-v3-details">
             <div className="doc-card-v3-title-row">
               <span className="doc-card-v3-title" title={doc.originalName || doc.name}>
                 {doc.originalName || doc.name}
@@ -413,17 +267,26 @@ export default function DocumentCard({
               </span>
               <span className="doc-card-v3-tag-pill">{tagLabel}</span>
             </div>
-
-            <div
-              className="doc-card-v3-esc"
-              onClick={(e) => {
-                e.stopPropagation();
-                setIsActive(false);
-              }}
-            >
-              <kbd className="doc-card-v3-kbd">Esc</kbd>
-              <span>to close</span>
             </div>
+          </div>
+
+          <div className="doc-card-v3-toolbar" aria-label="Document actions">
+            <button type="button" className="doc-card-v3-toolbar-btn" title="Preview" onClick={(e) => handleAction(e, () => onPreview(doc))}>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg><span>Preview</span>
+            </button>
+            <button type="button" className="doc-card-v3-toolbar-btn download" title="Download" onClick={(e) => handleAction(e, () => onDownload(doc))}>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg><span>Download</span>
+            </button>
+            <button type="button" className="doc-card-v3-toolbar-btn" title="Edit / Process" onClick={handleEditClick}>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z"/></svg><span>Edit</span>
+            </button>
+            <button type="button" className="doc-card-v3-toolbar-btn" title="Replace file" onClick={handleReplaceClick} disabled={!onReplace}>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg><span>Replace</span>
+            </button>
+            <span className="doc-card-v3-toolbar-divider" aria-hidden="true" />
+            <button type="button" className="doc-card-v3-toolbar-btn delete" title="Delete document" onClick={(e) => handleAction(e, () => onDelete(doc))}>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg><span>Delete</span>
+            </button>
           </div>
         </div>
       ) : (

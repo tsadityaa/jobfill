@@ -35,3 +35,7 @@ npm-debug.log*
 *.crx
 *.pem
 .output/
+
+# Wrangler
+.wrangler/
+backend/.wrangler/

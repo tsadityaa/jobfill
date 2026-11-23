@@ -10,7 +10,8 @@
 import type { UserProfile } from '../types/profile';
 import type { StoredDocument } from '../types/document';
 import { createEmptyProfile } from '../types/profile';
-import { supabase, getCurrentUser } from './supabase';
+import { supabase, getCurrentUser, getSession } from './supabase';
+import { readProfileCache, writeProfileCache } from './profileCache';
 import { deleteDocumentRegistryMetadata, mergeDocumentRegistryMetadata } from './documentRegistry';
 
 // ---- Profile Operations ----
@@ -20,10 +21,39 @@ export interface CloudProfileResult {
   hasSavedProfile: boolean;
 }
 
-/** Load user profile from Supabase with status indicating whether a full profile was saved */
+// Concurrent callers (the autofill pipelines run in parallel) share one request.
+let inFlightProfileLoad: { userId: string; promise: Promise<CloudProfileResult> } | null = null;
+
+/**
+ * Load user profile with status indicating whether a full profile was saved.
+ * The user id comes from the locally stored session (no auth-server round trip; Supabase
+ * row-level security still enforces access on the profiles query). Results are served from a
+ * short-lived memory cache, and concurrent callers share one in-flight request.
+ */
 export async function cloudGetProfileWithStatus(): Promise<CloudProfileResult> {
-  const user = await getCurrentUser();
-  if (!user) throw new Error('Not authenticated');
+  const session = await getSession();
+  const userId = session?.user?.id;
+  if (!userId) throw new Error('Not authenticated');
+
+  const cached = await readProfileCache(userId);
+  if (cached) return { profile: cached.profile, hasSavedProfile: cached.hasSavedProfile };
+
+  if (inFlightProfileLoad?.userId === userId) return inFlightProfileLoad.promise;
+
+  const promise = fetchProfileFromSupabase(userId)
+    .then(async (result) => {
+      await writeProfileCache(userId, result.profile, result.hasSavedProfile);
+      return result;
+    })
+    .finally(() => {
+      if (inFlightProfileLoad?.promise === promise) inFlightProfileLoad = null;
+    });
+  inFlightProfileLoad = { userId, promise };
+  return promise;
+}
+
+async function fetchProfileFromSupabase(userId: string): Promise<CloudProfileResult> {
+  const user = { id: userId };
 
   const { data, error } = await supabase
     .from('profiles')
@@ -98,6 +128,9 @@ export async function cloudSaveProfile(profile: UserProfile): Promise<void> {
     });
 
   if (error) throw new Error(`Failed to save profile: ${error.message}`);
+
+  // Write through so the background pipelines never autofill from a pre-save profile.
+  await writeProfileCache(user.id, profile, true);
 }
 
 // ---- Document Operations ----

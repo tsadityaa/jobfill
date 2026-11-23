@@ -102,12 +102,37 @@ export async function uploadToPdfCo(blob: Blob, filename: string): Promise<strin
     }
   }
 
-  const form = new FormData();
-  form.append('file', blob, filename);
-  const response = await uploadPdfToBackend(form);
-  const data = await response.json() as { url?: string; error?: boolean; message?: string };
+  // PDF.co can briefly return 5xx responses during upload. Rebuild the form
+  // for each attempt so the request body can be sent again.
+  const maxAttempts = 3;
+  let response: Response | undefined;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const form = new FormData();
+    form.append('file', blob, filename);
+    try {
+      response = await uploadPdfToBackend(form);
+    } catch (error) {
+      if (attempt === maxAttempts - 1) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 800 * (attempt + 1)));
+      continue;
+    }
+    if (![502, 503, 504].includes(response.status) || attempt === maxAttempts - 1) break;
+    await response.body?.cancel().catch(() => undefined);
+    await new Promise((resolve) => setTimeout(resolve, 800 * (attempt + 1)));
+  }
+
+  if (!response) throw new Error('Upload to PDF.co failed before receiving a backend response.');
+  const raw = await response.text();
+  let data: { url?: string; error?: string | boolean; message?: string } = {};
+  try {
+    data = JSON.parse(raw) as typeof data;
+  } catch {
+    // Keep the provider's plain-text error useful without dumping a large body.
+    data.message = raw.trim().slice(0, 300);
+  }
   if (!response.ok || data.error || !data.url) {
-    throw new Error(data.message ?? `Upload to PDF.co failed (${response.status}).`);
+    const detail = data.message ?? (typeof data.error === 'string' ? data.error : undefined);
+    throw new Error(detail || `Upload to PDF.co failed (${response.status}).`);
   }
   return data.url;
 }

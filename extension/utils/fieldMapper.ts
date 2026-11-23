@@ -8,7 +8,50 @@
 import type { UserProfile } from '../types/profile';
 import { getPrimary } from '../types/profile';
 import type { ProfileFieldKey, FieldMapping, DetectedField } from '../types/autofill';
-import { resolveEducationValue } from './educationPicker';
+import { pickEducation, resolveEducationValue } from './educationPicker';
+import { countryToNationality } from './nationality';
+
+function getExpectedPassOutYear(profile: UserProfile, field: DetectedField): string | undefined {
+  const label = [
+    field.attributes.labelText,
+    field.attributes.ariaLabel,
+    field.attributes.name,
+    field.attributes.id,
+  ].filter(Boolean).join(' ');
+  const educationKeyMatch = field.profileField?.match(/^education\.(current|latest|highest|ug|pg|phd)\.endDate$/);
+  if (!/\b(?:pass(?:ed)?\s*out|graduat(?:ion|ing)|completion)\b/i.test(label)
+    || !/\b(?:year|date)\b/i.test(label)
+    || !educationKeyMatch) {
+    return undefined;
+  }
+
+  const education = pickEducation(profile, educationKeyMatch[1] as 'current' | 'latest' | 'highest' | 'ug' | 'pg' | 'phd');
+  if (!education) return undefined;
+
+  // Prefer a year explicitly saved in the education end-date field.
+  const explicitYear = education.endDate?.match(/\b(?:19|20)\d{2}\b/)?.[0];
+  if (explicitYear) return explicitYear;
+
+  // The profile only has a start year for this ongoing B.Tech/B.E. Use the
+  // standard four-year duration to answer a pass-out-year question.
+  const degree = education.degree.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  if (!/\b(?:b tech|b e|bachelor of technology|bachelor of engineering)\b/.test(degree)) return undefined;
+  const startYear = education.startDate?.match(/\b(?:19|20)\d{2}\b/)?.[0];
+  return startYear ? String(Number(startYear) + 4) : undefined;
+}
+
+/** Resolve the exact saved value, with a narrow expected-year fallback for pass-out labels. */
+export function resolveProfileValueForField(
+  profile: UserProfile,
+  field: DetectedField,
+  profileField: ProfileFieldKey | null = field.profileField,
+): string | undefined {
+  if (!profileField) return undefined;
+  const contextualField = profileField === field.profileField ? field : { ...field, profileField };
+  const expectedPassOutYear = getExpectedPassOutYear(profile, contextualField);
+  if (expectedPassOutYear) return expectedPassOutYear;
+  return resolveProfileValue(profile, profileField);
+}
 
 /**
  * Resolve a profile field key to its actual value from the profile.
@@ -40,6 +83,8 @@ export function resolveProfileValue(
       return profile.personal.dateOfBirth || undefined;
     case 'personal.gender':
       return profile.personal.gender || undefined;
+    case 'personal.nationality':
+      return countryToNationality(getPrimary(profile.addresses)?.country);
 
     // ---- Contact ----
     case 'contact.primaryPhoneNumber':
@@ -252,7 +297,7 @@ export function createFieldMappings(
   for (const field of fields) {
     if (field.category !== 'SAFE_AUTO' || !field.profileField) continue;
 
-    const value = resolveProfileValue(profile, field.profileField);
+    const value = resolveProfileValueForField(profile, field);
     if (!value) continue;
 
     mappings.push({

@@ -2,6 +2,7 @@
 // Supabase Client — Singleton
 // ============================================================
 import { createClient } from '@supabase/supabase-js';
+import { clearProfileCache } from './profileCache';
 
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL as string;
 const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY as string;
@@ -48,5 +49,6 @@ export async function getSession() {
 
 /** Sign out */
 export async function signOut() {
+  await clearProfileCache();
   await supabase.auth.signOut();
 }

@@ -176,6 +176,20 @@
     ]
   },
   {
+    "profileField": "personal.nationality",
+    "synonyms": [
+      "nationality",
+      "your nationality",
+      "applicant nationality",
+      "candidate nationality",
+      "citizenship",
+      "your citizenship",
+      "country of citizenship",
+      "citizen of",
+      "nationality country"
+    ]
+  },
+  {
     "profileField": "application.expectedJoiningDate",
     "synonyms": [
       "expected joining date",
@@ -418,20 +432,9 @@
       "house flat no",
       "street address line one",
       "address details",
-      "address line 1 house no"
-    ],
-    "weak": [
+      "address line 1 house no",
       "address",
-      "address line",
-      "mailing address",
-      "residential address",
-      "permanent address",
-      "current address",
-      "home address",
-      "correspondence address",
-      "communication address",
-      "postal address",
-      "present address"
+      "address line"
     ],
     "autocomplete": [
       "address-line1",
@@ -593,13 +596,11 @@
       "country of residence",
       "current country",
       "residential country",
-      "nationality country",
       "select country",
       "choose country",
       "country territory",
       "current residence country",
       "residence country",
-      "country of citizenship",
       "country of origin"
     ],
     "autocomplete": [
@@ -689,9 +690,7 @@
       "last attended university",
       "last attended institution",
       "campus name",
-      "name of campus"
-    ],
-    "weak": [
+      "name of campus",
       "school",
       "university",
       "college",
@@ -781,9 +780,7 @@
       "qualifying examination",
       "examination passed",
       "exam passed",
-      "course or degree"
-    ],
-    "weak": [
+      "course or degree",
       "degree",
       "qualification",
       "degree type",
@@ -840,7 +837,7 @@
   },
   {
     "profileField": "education.latest.gpa",
-    "weak": [
+    "synonyms": [
       "gpa",
       "cgpa",
       "grade",
@@ -853,9 +850,7 @@
       "aggregate percentage",
       "aggregate marks",
       "overall percentage",
-      "score"
-    ],
-    "synonyms": [
+      "score",
       "cgpa percentage",
       "gpa percentage",
       "cgpa out of 10",
@@ -1670,9 +1665,7 @@
       "last job title",
       "last designation",
       "last position",
-      "last role"
-    ],
-    "weak": [
+      "last role",
       "title"
     ],
     "autocomplete": [

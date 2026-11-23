@@ -47,6 +47,7 @@ export default function DocumentsSection() {
   // Image editor state
   const [editorDocId, setEditorDocId] = useState<string | null>(() => sessionStorage.getItem('pc_editorDocId'));
   const [editorBlob, setEditorBlob] = useState<Blob | null>(null);
+  const [editorLoadError, setEditorLoadError] = useState(false);
 
   // PDF viewer state
   const [previewDocId, setPreviewDocId] = useState<string | null>(() => sessionStorage.getItem('pc_previewDocId'));
@@ -73,6 +74,19 @@ export default function DocumentsSection() {
   const editorDoc = documents.find(d => d.id === editorDocId) || null;
   const previewDoc = documents.find(d => d.id === previewDocId) || null;
   const processorDoc = documents.find(d => d.id === processorDocId) || null;
+
+  useEffect(() => {
+    if (!editorDocId || editorBlob) return;
+    let current = true;
+    setEditorLoadError(false);
+    loadDocumentBlob(editorDocId)
+      .then((blob) => { if (current) setEditorBlob(blob); })
+      .catch((err) => {
+        console.error('Failed to load document for editing:', err);
+        if (current) setEditorLoadError(true);
+      });
+    return () => { current = false; };
+  }, [editorDocId, editorBlob]);
 
   // Load documents on mount
   useEffect(() => {
@@ -221,14 +235,10 @@ export default function DocumentsSection() {
   }, []);
 
   // Open image editor
-  const handleEdit = useCallback(async (doc: StoredDocument) => {
-    try {
-      const blob = await loadDocumentBlob(doc.id);
-      setEditorDocId(doc.id);
-      setEditorBlob(blob);
-    } catch (err) {
-      console.error('Failed to load document for editing:', err);
-    }
+  const handleEdit = useCallback((doc: StoredDocument) => {
+    setEditorBlob(null);
+    setEditorLoadError(false);
+    setEditorDocId(doc.id);
   }, []);
 
   // Open PDF viewer
@@ -497,16 +507,49 @@ export default function DocumentsSection() {
       )}
 
       {/* Image Editor Modal */}
-      {editorDoc && editorBlob && (
+      {editorDoc && (editorBlob ? (
         <ImageEditor
           imageBlob={editorBlob}
           fileName={editorDoc.originalName}
           onClose={() => {
             setEditorDocId(null);
             setEditorBlob(null);
+            setEditorLoadError(false);
           }}
         />
-      )}
+      ) : (
+        <div className="image-editor-overlay" onClick={(e) => {
+          if (e.target === e.currentTarget) {
+            setEditorDocId(null);
+            setEditorBlob(null);
+            setEditorLoadError(false);
+          }
+        }}>
+          <div className="image-editor image-editor-loading-modal" role="status" aria-live="polite">
+            <div className="image-editor-header">
+              <h3 className="image-editor-title">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg>
+                <span>Image Editor</span>
+              </h3>
+              <button className="image-editor-close" onClick={() => {
+                setEditorDocId(null);
+                setEditorBlob(null);
+                setEditorLoadError(false);
+              }} aria-label="Close image editor">✕</button>
+            </div>
+            <div className="image-editor-loading-body">
+              {!editorLoadError && <span className="image-editor-loading-spinner" aria-hidden="true" />}
+              <strong>{editorLoadError ? 'Could not open this image' : 'Opening image editor…'}</strong>
+              <span>{editorLoadError ? 'Close this window and try again.' : editorDoc.originalName}</span>
+              {editorLoadError && <button className="image-editor-loading-close" onClick={() => {
+                setEditorDocId(null);
+                setEditorBlob(null);
+                setEditorLoadError(false);
+              }}>Close</button>}
+            </div>
+          </div>
+        </div>
+      ))}
 
       {/* PDF Viewer Modal */}
       {previewDoc && previewBlob && (

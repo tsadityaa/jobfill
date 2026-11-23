@@ -133,6 +133,7 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
   const [questionWatchTabId, setQuestionWatchTabId] = useState<number | null>(null);
   const [fileUploadTasks, setFileUploadTasks] = useState<FileUploadTask[]>([]);
   const [dropdownAI, setDropdownAI] = useState(true);
+  const [aiPending, setAiPending] = useState(false);
 
   useEffect(() => {
     void isDropdownAIEnabled().then(setDropdownAI);
@@ -197,6 +198,7 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
         setQuestionTasks([]);
         setQuestionWatchTabId(null);
         setFileUploadTasks([]);
+        setAiPending(false);
       });
     };
 
@@ -204,7 +206,14 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
     return () => chrome.runtime.onMessage.removeListener(handleFormStructureUpdated);
   }, []);
 
-  const fillPreparedWork = async (tabId: number, result: ScanResult, mappings: FieldMapping[], mappingIsPending: boolean) => {
+  // Local synonym matches at or above this confidence are trusted without an AI re-check
+  // (same threshold the background uses to decide which Google Forms fields go to the AI).
+  const TRUSTED_LOCAL_CONFIDENCE = 0.85;
+
+  // `googleForms` enables staged filling: stage 1 fills the trusted local matches right away,
+  // stage 2 (below, once the background AI mapping is done) fills the AI-mapped and low-confidence fields.
+  const fillPreparedWork = async (tabId: number, result: ScanResult, mappings: FieldMapping[], mappingIsPending: boolean, googleForms = false) => {
+    const stagedFill = googleForms && mappingIsPending;
     setScanResult(result);
     setAiMappedCount(mappings.length);
     setQuestionTasks([]);
@@ -216,7 +225,8 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
     void chrome.runtime.sendMessage({ type: 'TRIGGER_FILE_UPLOADS', tabId });
     void chrome.runtime.sendMessage({ type: 'TRIGGER_CHOICE_AUTOFILL', tabId });
     void chrome.runtime.sendMessage({ type: 'TRIGGER_DROPDOWN_AUTOFILL', tabId });
-    const regexMappings = createFieldMappings(result.fields, profile);
+    const regexMappings = createFieldMappings(result.fields, profile)
+      .filter((mapping) => !stagedFill || mapping.confidence >= TRUSTED_LOCAL_CONFIDENCE);
     const regexSelectors = new Set(regexMappings.map((mapping) => mapping.selector));
     const combinedMappings = [
       ...regexMappings,
@@ -242,7 +252,13 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
       ...fillSummary,
       fields: [],
     });
-    if (!mappingIsPending) setState('filled');
+    // If local fields were filled, transition to 'filled' immediately so user isn't blocked by background AI
+    if (!mappingIsPending || fillSummary.filledFields > 0 || combinedMappings.length > 0) {
+      setState('filled');
+    }
+    if (mappingIsPending) {
+      setAiPending(true);
+    }
     chrome.runtime.sendMessage({ type: 'UPDATE_BADGE', count: result.mappedFields });
 
     if (mappingIsPending) {
@@ -260,10 +276,39 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
             }))
             .filter((mapping) => mapping.value.length > 0);
           setAiMappedCount(resolved.length);
-          setScanResult(latest.scanResult ?? result);
+          const finalScan = latest.scanResult ?? result;
+          setScanResult(finalScan);
+          if (stagedFill) {
+            // Stage 2: AI-mapped fields plus the low-confidence local matches stage 1 held back.
+            // Fields already filled in stage 1 are skipped by the content script (skipped_existing).
+            const resolvedSelectors = new Set(resolved.map((mapping) => mapping.selector));
+            const stage2Mappings = [
+              ...resolved,
+              ...createFieldMappings(finalScan.fields, profile).filter((mapping) => !resolvedSelectors.has(mapping.selector)),
+            ];
+            const stage2Responses = stage2Mappings.length > 0
+              ? await sendToAllFrames<FillFieldsResponse>(tabId, { type: 'FILL_FIELDS', mappings: stage2Mappings })
+              : [];
+            const stage2Filled = stage2Responses.reduce((sum, response) => sum + (response?.result?.filledFields ?? 0), 0);
+            if (stage2Filled > 0) {
+              setFillResult((prev) => prev ? {
+                ...prev,
+                totalFields: prev.totalFields + stage2Filled,
+                filledFields: prev.filledFields + stage2Filled,
+              } : prev);
+            }
+          } else if (resolved.length > 0) {
+            setFillResult((prev) => prev ? {
+              ...prev,
+              totalFields: prev.totalFields + resolved.length,
+              filledFields: prev.filledFields + resolved.length,
+            } : prev);
+          }
+          setAiPending(false);
           setState('filled');
           break;
         }
+        setAiPending(false);
         setState('filled');
       })();
     }
@@ -276,6 +321,7 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
     setFillResult(null);
     setDropdownSummary(null);
     setAiMappedCount(0);
+    setAiPending(false);
     setQuestionTasks([]);
     setQuestionWatchTabId(null);
 
@@ -286,15 +332,21 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
       }
 
       // ---- Fast path: check background pre-scan cache ----
-      // Ask the background to start or reuse pre-scan before polling. PAGE_READY
-      // may still be in flight when the popup opens immediately after navigation.
-      const waitForCache = async (maxMs: number) => {
+      // Ask the background to start or reuse pre-scan before polling.
+      // If local fields are already scanned, return immediately (do not block on background AI).
+      const waitForCache = async (maxMs: number, allowPartialScan = true) => {
         const deadline = Date.now() + maxMs;
         while (true) {
           const r = await getTabResult(tab.id!);
-          if (r && r.status !== 'running') return r;
+          if (r) {
+            if (r.status === 'done' || r.status === 'error' || r.status === 'not_job') return r;
+            // Pre-scan finished local matching! Return immediately without waiting for slow AI calls.
+            if (r.status === 'running' && allowPartialScan && r.scanResult && r.scanResult.totalFields > 0) {
+              return r;
+            }
+          }
           if (Date.now() >= deadline) return r;
-          await new Promise((res) => setTimeout(res, 150));
+          await new Promise((res) => setTimeout(res, 100));
         }
       };
 
@@ -323,26 +375,34 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
           // The normal scan path remains available if frame metadata is unavailable.
         }
       }
+      // Only a finished result from an older mapping version is stale. The in-progress result
+      // ('running') has no version yet and holds the fresh local scan, so it must be kept.
       if (
         isGoogleFormsTab
         && cached
+        && cached.status === 'done'
         && cached.googleFormMappingVersion !== GOOGLE_FORM_MAPPING_VERSION
       ) {
         await clearTabResult(tab.id);
         cached = null;
       }
-      if (isGoogleFormsTab && cached?.aiMappingComplete === false) {
-        await clearTabResult(tab.id);
-        cached = null;
-      }
+      // All forms (Google Forms included) fill the trusted local matches immediately. For Google Forms,
+      // fillPreparedWork holds back low-confidence matches and fills them with the AI mappings once the
+      // background mapping finishes (staged fill), so the user never waits on the AI for the safe fields.
+      // A cached result with an incomplete AI mapping is kept (not discarded) so a slow or failed AI call
+      // cannot force a fresh scan and another long wait on every click.
+      const hasReadyFields = Boolean(cached?.scanResult && cached.scanResult.totalFields > 0);
+      const isCompleteOrUsable = cached?.status === 'done' || hasReadyFields;
 
-      if (cached === null || cached.status === 'running') {
-        console.log('[AutofillButton] Requesting background pre-scan...');
+      if (!isCompleteOrUsable) {
+        console.log('[AutofillButton] Cache not ready — requesting background pre-scan or waiting for local fields...');
         await chrome.runtime.sendMessage({ type: 'REQUEST_PRESCAN', tabId: tab.id });
-        cached = await waitForCache(30000);
-        if (cached?.status === 'running') {
+        cached = await waitForCache(30000, true);
+        if (cached?.status === 'running' && !cached.scanResult?.totalFields) {
           throw new Error('The form scan is still running. Wait for it to finish before filling.');
         }
+      } else {
+        console.log(`[AutofillButton] Using pre-scan cache (${cached?.status}): ${cached?.scanResult?.totalFields ?? 0} fields ready immediately`);
       }
 
       if (cached?.scanResult && cached.scanResult.totalFields > 0) {
@@ -370,9 +430,11 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
           unknownFields: fields.filter((field) => field.category === 'UNKNOWN').length,
         };
 
+        // Google Forms: any incomplete AI mapping is pending, because the AI also re-checks
+        // fields that are not UNKNOWN (empty profile value, low confidence).
         const mappingIsPending = cached.aiMappingComplete === false
-          && cachedScanResult.unknownFields > 0;
-        await fillPreparedWork(tab.id, cachedScanResult, resolvedCachedMappings, mappingIsPending);
+          && (isGoogleFormsTab || cachedScanResult.unknownFields > 0);
+        await fillPreparedWork(tab.id, cachedScanResult, resolvedCachedMappings, mappingIsPending, isGoogleFormsTab);
         return;
       }
 
@@ -542,6 +604,7 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
     setDropdownSummary(null);
     setError(null);
     setAiMappedCount(0);
+    setAiPending(false);
     setQuestionTasks([]);
     setQuestionWatchTabId(null);
     setFileUploadTasks([]);
@@ -566,6 +629,12 @@ export default function AutofillButton({ profile }: AutofillButtonProps) {
                 <div className="autofill-result-row">
                   <span className="label">AI mapped</span>
                   <span className="value" style={{ color: 'var(--color-pc-accent-start)' }}>{aiMappedCount}</span>
+                </div>
+              )}
+              {aiPending && (
+                <div className="autofill-result-row animate-pulse-glow" style={{ color: 'var(--color-pc-accent-start)' }}>
+                  <span className="label">AI analysis</span>
+                  <span className="value" style={{ fontSize: '0.72rem' }}>Checking remaining fields…</span>
                 </div>
               )}
             </>

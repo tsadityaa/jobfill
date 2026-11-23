@@ -1,5 +1,5 @@
 // ============================================================
-// AI Mapper — OpenRouter API Integration
+// AI Mapper — Agent Router Integration
 // ============================================================
 // Sends ONLY sanitized field descriptors to the AI.
 // Receives ONLY field-to-intent mappings back.
@@ -9,7 +9,7 @@
 import type { ProfileFieldKey } from '../types/autofill';
 import { ALL_INTENT_KEYS } from '../types/aiMapper';
 import type { SanitizedField, GoogleFormLabelField, AIMappingResponse } from '../types/aiMapper';
-import { isBackendConfigured, requestOpenRouter } from './backendClient';
+import { AI_MODEL, isBackendConfigured, requestAgentRouter } from './backendClient';
 
 const SYSTEM_PROMPT = `You are a form field classifier for job application websites.
 
@@ -28,6 +28,7 @@ Rules:
    - A field labeled only "Name", with no first-name or last-name qualifier → personal.fullName
    - A "Name" field with a hint like "First and last name" → personal.fullName
    - "gender" or "sex" → personal.gender
+   - "nationality" or "citizenship" → personal.nationality
    - "university", "college", or "institute" → education.current.institutionName
    - "12th", "twelfth", "PUC", "HSC", "junior college", or "intermediate" school/college → education.twelfth.institutionName
    - "12th", "twelfth", "PUC", "HSC", or "intermediate" percentage/score/marks → education.twelfth.percentage
@@ -64,7 +65,7 @@ export interface AIMapperOptions {
 
 const GOOGLE_FORM_SYSTEM_PROMPT = `Classify each supplied unknown Google Forms field label against the supplied canonical profile intent keys and optional intent descriptions. Infer the best match from the label's meaning, including abbreviations and synonyms. Map a field labeled only "Name", with no first-name or last-name qualifier, to personal.fullName. Map a field labeled "Name" with a hint like "First and last name" to personal.fullName, not personal.firstName. Map explicit first-name and last-name fields to their corresponding keys. Map education labels that name a level (UG/undergraduate/bachelor, PG/postgraduate/master, PhD/doctorate) to the matching education.ug.*, education.pg.*, or education.phd.* key, and "highest qualification" to education.highest.*. Map expected date of joining or expected start date to application.expectedJoiningDate; keep it distinct from date of birth, education dates, and employment dates. Return only a supplied intent key or null for each fieldId. Return null when a label has no matching profile variable or asks for a preference, job choice, consent, upload, password, OTP, legal declaration, or demographic answer. Never invent values or return placeholder text. Respond only with JSON: {"mappings":{"f0":null}}.`;
 /**
- * Call the OpenRouter API to map sanitized fields to intent keys.
+ * Call Agent Router to map sanitized fields to intent keys.
  * Returns only validated mappings (rejects hallucinated keys).
  */
 export async function mapFieldsWithAI(
@@ -76,8 +77,7 @@ export async function mapFieldsWithAI(
     return { mappings: {}, completed: false };
   }
 
-  // Use a fast, smart model like gpt-4o-mini or claude-3-haiku via OpenRouter
-  const model = 'openai/gpt-4o-mini';
+  const model = AI_MODEL;
 
   const userPrompt = JSON.stringify({
     fields,
@@ -85,22 +85,13 @@ export async function mapFieldsWithAI(
     ...(options.intentDescriptions ? { intentDescriptions: options.intentDescriptions } : {}),
   });
 
-  if (import.meta.env.DEV) {
-    console.info('[Pipeline 1/5] OpenRouter request', {
-      model,
-      promptMode: options.googleForm ? 'Google Forms label mapper' : 'sanitized field mapper',
-      systemPrompt: options.googleForm ? GOOGLE_FORM_SYSTEM_PROMPT : SYSTEM_PROMPT,
-      userPrompt: JSON.parse(userPrompt),
-    });
-  }
-
   const allowedIntentKeys = options.allowedIntentKeys ?? ALL_INTENT_KEYS;
 
   try {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), options.timeoutMs ?? 15000);
 
-    const response = await requestOpenRouter({
+    const response = await requestAgentRouter({
       model: model,
       messages: [
         { role: 'system', content: options.googleForm ? GOOGLE_FORM_SYSTEM_PROMPT : SYSTEM_PROMPT },
@@ -109,19 +100,19 @@ export async function mapFieldsWithAI(
       temperature: 0.1, // Low temperature for accuracy
       max_tokens: 600,
       response_format: { type: 'json_object' } // Force JSON output if supported
-    }, controller.signal);
+    }, controller.signal, options.googleForm ? 'google-form-field-map' : 'field-map');
 
     if (!response.ok) {
       clearTimeout(timeoutId);
       const errorText = await response.text();
-      console.error('[AI Mapper] API error:', response.status, errorText);
+      console.error('[AI Mapper] request rejected', { status: response.status, detailCharacters: errorText.length });
       return { mappings: {}, completed: false };
     }
 
     const data = await response.json();
     clearTimeout(timeoutId);
 
-    // Extract text from OpenRouter response
+    // Extract text from the chat-compatible Agent Router response
     const text = data?.choices?.[0]?.message?.content;
     if (!text) {
       console.error('[AI Mapper] Empty response from API');
@@ -133,7 +124,7 @@ export async function mapFieldsWithAI(
     const parsed = JSON.parse(cleanText);
     const rawMappings: Record<string, string | null> = parsed.mappings ?? {};
     if (import.meta.env.DEV) {
-      console.info('[Pipeline 1/5] OpenRouter raw mapping response', rawMappings);
+      console.info('[Pipeline 1/5] Agent Router mapping response received', { mappingCount: Object.keys(rawMappings).length });
     }
 
     // Validate: only keep mappings that reference real ProfileFieldKeys

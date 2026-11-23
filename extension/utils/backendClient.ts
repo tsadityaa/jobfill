@@ -1,11 +1,10 @@
 import { getSession } from './supabase';
 
 const BACKEND_URL = (import.meta.env.VITE_JOBFILL_BACKEND_URL as string | undefined)?.replace(/\/+$/, '');
-const OPENROUTER_KEY = import.meta.env.VITE_OPENROUTER_API_KEY as string | undefined;
-const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
+export const AI_MODEL = (import.meta.env.VITE_AI_MODEL as string | undefined) || 'gpt-5.6-sol';
 
 export function isBackendConfigured(): boolean {
-  return Boolean(BACKEND_URL || (OPENROUTER_KEY && OPENROUTER_KEY !== 'xyzz'));
+  return Boolean(BACKEND_URL);
 }
 
 export function getBackendBaseURL(): string {
@@ -30,77 +29,84 @@ export async function backendFetch(path: string, init: RequestInit = {}): Promis
   return fetch(`${BACKEND_URL}${path}`, { ...init, headers });
 }
 
-/**
- * Helper: call OpenRouter directly using the local API key (no auth needed).
- * Returns null if no key is configured.
- */
-function directOpenRouterFetch(payload: unknown, signal?: AbortSignal): Promise<Response> | null {
-  if (!OPENROUTER_KEY || OPENROUTER_KEY === 'xyzz') return null;
-  return fetch(OPENROUTER_URL, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${OPENROUTER_KEY}`,
-      'Content-Type': 'application/json',
-      'HTTP-Referer': 'http://localhost:3000',
-      'X-Title': 'Personal Copilot Extension',
-    },
-    body: JSON.stringify(payload),
-    signal,
-  });
-}
-
-export async function requestOpenRouter(payload: unknown, signal?: AbortSignal): Promise<Response> {
+export async function requestAgentRouter(payload: unknown, signal?: AbortSignal, purpose = 'unspecified'): Promise<Response> {
   const MAX_RETRIES = 3;
   const BASE_DELAY_MS = 2000;
-  const hasDirectKey = Boolean(OPENROUTER_KEY && OPENROUTER_KEY !== 'xyzz');
+  // A 502 from the backend means the upstream call failed or returned no assistant text
+  // (a transient model glitch). Retry it once; a second 502 is returned to the caller.
+  const BAD_GATEWAY_RETRY_DELAY_MS = 1000;
+  let retriedBadGateway = false;
+  if (!BACKEND_URL) throw new Error('Set VITE_JOBFILL_BACKEND_URL to use Agent Router through the secure backend.');
+  const modelPayload = payload && typeof payload === 'object' && !Array.isArray(payload)
+    ? { ...(payload as Record<string, unknown>), model: AI_MODEL, purpose }
+    : payload;
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    const requestId = crypto.randomUUID();
+    const startedAt = performance.now();
     let response: Response;
-
-    if (!BACKEND_URL && hasDirectKey) {
-      // No backend configured — go direct
-      response = await directOpenRouterFetch(payload, signal)!;
-    } else if (BACKEND_URL) {
-      // Backend configured — try it, but fall back to direct key on auth failure
-      try {
-        response = await backendFetch('/api/openrouter', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-          signal,
-        });
-      } catch (err) {
-        // Auth failed (session lost after extension reload) — fall back to direct key
-        if (hasDirectKey) {
-          console.warn('[JobFill OpenRouter] Backend auth failed, falling back to direct OpenRouter API key:', (err as Error).message);
-          response = await directOpenRouterFetch(payload, signal)!;
-        } else {
-          throw err;
-        }
-      }
-    } else {
-      throw new Error('No OpenRouter backend or API key configured.');
+    console.info('[AgentRouter] request ' + JSON.stringify({
+      id: requestId,
+      purpose,
+      model: AI_MODEL,
+      apiMode: modelPayload && typeof modelPayload === 'object' && 'api_mode' in modelPayload
+        ? (modelPayload as Record<string, unknown>).api_mode
+        : 'responses',
+      reasoningEffort: modelPayload && typeof modelPayload === 'object' && 'reasoning_effort' in modelPayload
+        ? (modelPayload as Record<string, unknown>).reasoning_effort
+        : 'provider-default',
+      maxOutputTokens: modelPayload && typeof modelPayload === 'object' && 'max_tokens' in modelPayload
+        ? (modelPayload as Record<string, unknown>).max_tokens
+        : undefined,
+      attempt: attempt + 1,
+    }));
+    try {
+      response = await backendFetch('/api/agentrouter', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Request-ID': requestId },
+        body: JSON.stringify(modelPayload),
+        signal,
+      });
+    } catch (error) {
+      console.error('[AgentRouter] call failed ' + JSON.stringify({
+        id: requestId,
+        purpose,
+        model: AI_MODEL,
+        attempt: attempt + 1,
+        durationMs: Math.round(performance.now() - startedAt),
+        error: error instanceof Error ? error.name : 'UnknownError',
+      }));
+      throw error;
     }
 
-    // Retry on rate-limit (429) or model overloaded (503)
-    if ((response.status === 429 || response.status === 503) && attempt < MAX_RETRIES) {
-      const delay = BASE_DELAY_MS * Math.pow(2, attempt); // 2s, 4s, 8s
-      console.warn(`[JobFill OpenRouter] HTTP ${response.status} — model overloaded/rate-limited, retrying in ${delay}ms (attempt ${attempt + 1}/${MAX_RETRIES})`);
-      await new Promise((resolve) => setTimeout(resolve, delay));
+    const shouldRetryBadGateway = response.status === 502 && !retriedBadGateway && attempt < MAX_RETRIES;
+    if (shouldRetryBadGateway) retriedBadGateway = true;
+    const retryDelayMs = (response.status === 429 || response.status === 503) && attempt < MAX_RETRIES
+      ? BASE_DELAY_MS * Math.pow(2, attempt)
+      : shouldRetryBadGateway
+        ? BAD_GATEWAY_RETRY_DELAY_MS
+        : 0;
+    console.info('[AgentRouter] response ' + JSON.stringify({
+      id: response.headers.get('X-Request-ID') || requestId,
+      purpose,
+      model: AI_MODEL,
+      attempt: attempt + 1,
+      status: response.status,
+      durationMs: Math.round(performance.now() - startedAt),
+      ...(retryDelayMs ? { retryingInMs: retryDelayMs } : {}),
+    }));
+
+    // Retry on rate-limit (429), model overloaded (503), or a one-time bad gateway (502)
+    if (retryDelayMs) {
+      await response.body?.cancel().catch(() => undefined);
+      await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
       continue;
     }
 
     return response;
   }
 
-  // Should never reach here, but just in case — make the final request without retry
-  if (hasDirectKey) return directOpenRouterFetch(payload, signal)!;
-  return backendFetch('/api/openrouter', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-    signal,
-  });
+  throw new Error('Agent Router retry loop ended unexpectedly.');
 }
 
 export async function requestMemory(operation: 'add' | 'search' | 'profile', payload: unknown): Promise<Response> {

@@ -24,6 +24,7 @@ export type ProfileFieldKey =
   | 'personal.fullName'
   | 'personal.dateOfBirth'
   | 'personal.gender'
+  | 'personal.nationality'
 
   // Contact
   | 'contact.primaryPhoneNumber'

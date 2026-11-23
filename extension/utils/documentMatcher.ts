@@ -1,6 +1,6 @@
 import type { DocumentType, StoredDocument } from '../types/document';
 import { inferDocumentType } from '../types/document';
-import { requestOpenRouter } from './backendClient';
+import { AI_MODEL, requestAgentRouter } from './backendClient';
 
 const DOCUMENT_TYPES: DocumentType[] = [
   'resume',
@@ -32,8 +32,8 @@ export async function classifyDocumentField(label: string, accept = ''): Promise
   if (deterministicType) return deterministicType;
 
   try {
-    const response = await requestOpenRouter({
-        model: 'openai/gpt-4o-mini',
+    const response = await requestAgentRouter({
+        model: AI_MODEL,
         temperature: 0,
         response_format: { type: 'json_object' },
         messages: [
@@ -43,7 +43,7 @@ export async function classifyDocumentField(label: string, accept = ''): Promise
           },
           { role: 'user', content: JSON.stringify({ fieldLabel: label, acceptedFileTypes: accept }) },
         ],
-      }, AbortSignal.timeout(8000));
+      }, AbortSignal.timeout(8000), 'document-matcher');
     if (!response.ok) return null;
     const data = await response.json();
     const text = data?.choices?.[0]?.message?.content;

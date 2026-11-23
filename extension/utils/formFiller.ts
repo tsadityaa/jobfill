@@ -627,13 +627,130 @@ function isMappingSatisfied(mapping: FieldMapping): boolean {
 
 let fillQueue: Promise<void> = Promise.resolve();
 
-export function fillQuestionAnswer(el: HTMLInputElement | HTMLTextAreaElement, value: string): boolean {
+// ============================================================
+// DOM Settle Utilities — replace blind setTimeout sleeps
+// ============================================================
+
+const FORM_TAGS = 'input, select, textarea, option, [role="combobox"], [role="listbox"], [role="option"], [role="textbox"]';
+
+function isFormMutation(m: MutationRecord): boolean {
+  if (m.type === 'childList') {
+    // If options were swapped inside a select/combobox (e.g. Degree -> Field of Study)
+    if (m.target instanceof Element && m.target.matches('select, [role="listbox"], [role="combobox"]')) {
+      return true;
+    }
+    const nodes = [...Array.from(m.addedNodes), ...Array.from(m.removedNodes)];
+    return nodes.some(
+      (n) => n instanceof Element && (n.matches(FORM_TAGS) || n.querySelector(FORM_TAGS) !== null),
+    );
+  }
+  return m.target instanceof Element && m.target.matches(FORM_TAGS);
+}
+
+/**
+ * Watch for form DOM mutations across Phase 1 and settle afterwards.
+ * Starts observing BEFORE selects are touched so synchronous re-renders
+ * (e.g. React 17 discrete events, jQuery, vanilla change handlers)
+ * are never missed.
+ */
+function startFormWatch() {
+  let sawFormChange = false;
+  let lastChange = performance.now();
+
+  const observer = new MutationObserver((records) => {
+    if (!records.some(isFormMutation)) return;
+    sawFormChange = true;
+    lastChange = performance.now();
+  });
+
+  observer.observe(document.body, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ['disabled', 'hidden', 'aria-hidden', 'style', 'class'],
+  });
+
+  return {
+    stop: () => observer.disconnect(),
+    /**
+     * Resolves once form mutations have been quiet for quietMs.
+     * Returns true if any form mutation occurred since startFormWatch() was called.
+     */
+    settle(quietMs = 100, maxMs = 800): Promise<boolean> {
+      const start = performance.now();
+      return new Promise((resolve) => {
+        const tick = () => {
+          const now = performance.now();
+          if (now - start >= maxMs || (now - start >= quietMs && now - lastChange >= quietMs)) {
+            observer.disconnect();
+            resolve(sawFormChange);
+          } else {
+            setTimeout(tick, 25);
+          }
+        };
+        tick();
+      });
+    },
+  };
+}
+
+/**
+ * Wait one animation frame, falling back to a 16ms timer in hidden tabs
+ * where rAF doesn't fire.
+ */
+function nextFrame(): Promise<void> {
+  return new Promise<void>((r) => {
+    if (document.hidden) setTimeout(r, 16);
+    else requestAnimationFrame(() => r());
+  });
+}
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/**
+ * Progressive verification: check immediately after one frame, then back off
+ * with increasing delays only for the fields that are still missing.
+ * Cumulative worst case ≈ 500ms (same safety as before), but typical case is ~16ms.
+ */
+async function findMissingMappings(mappings: FieldMapping[]): Promise<FieldMapping[]> {
+  let missing = mappings;
+  // 0 = check after one frame; then 50ms, 150ms, 300ms cumulative waits
+  for (const wait of [0, 50, 150, 300]) {
+    if (wait) await sleep(wait);
+    else await nextFrame();
+    missing = missing.filter((m) => !isMappingSatisfied(m));
+    if (missing.length === 0) return [];
+  }
+  return missing;
+}
+
+export function fillQuestionAnswer(el: HTMLInputElement | HTMLTextAreaElement | HTMLElement, value: string): boolean {
   return withScrollLockSync(() => {
     const cleaned = cleanAnswerText(value);
     if (!cleaned.trim()) return false;
-    setNativeValue(el, cleaned);
-    dispatchInputEvents(el);
-    return el.value === cleaned;
+    if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+      setNativeValue(el, cleaned);
+      dispatchInputEvents(el);
+      const success = el.value === cleaned;
+      if (success) {
+        ensureStyles();
+        glowField(el);
+      }
+      return success;
+    }
+
+    if (el.getAttribute('role') !== 'textbox' && !el.isContentEditable) return false;
+    el.textContent = cleaned;
+    el.dispatchEvent(new FocusEvent('focus', { bubbles: true }));
+    el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+    el.dispatchEvent(new FocusEvent('blur', { bubbles: true }));
+    const success = (el.innerText || el.textContent || '').trim() === cleaned.trim();
+    if (success) {
+      ensureStyles();
+      glowField(el);
+    }
+    return success;
   });
 }
 
@@ -642,6 +759,7 @@ export function fillQuestionAnswer(el: HTMLInputElement | HTMLTextAreaElement, v
  */
 function fillSelect(el: HTMLSelectElement, value: string): boolean {
   const normalizedValue = value.toLowerCase().trim();
+  if (!normalizedValue) return false;
 
   for (const option of el.options) {
     const optText = option.textContent?.toLowerCase().trim() ?? '';
@@ -654,10 +772,14 @@ function fillSelect(el: HTMLSelectElement, value: string): boolean {
     }
   }
 
-  // Fuzzy match: check if option text contains the value or vice versa
+  // Fuzzy match: check if option text contains the value or vice versa.
+  // Guard against blank/placeholder options where "india".includes("") would falsely match!
   for (const option of el.options) {
     const optText = option.textContent?.toLowerCase().trim() ?? '';
-    if (optText.includes(normalizedValue) || normalizedValue.includes(optText)) {
+    if (!optText) continue;
+    if (/^(?:select(?: one)?|choose(?: one)?|please select|--|\s*)$/i.test(optText)) continue;
+
+    if (optText.includes(normalizedValue) || (optText.length >= 3 && normalizedValue.includes(optText))) {
       el.value = option.value;
       dispatchInputEvents(el);
       return true;
@@ -804,8 +926,23 @@ function checkBadge(el: HTMLElement) {
 }
 
 /** Neon glow outline on the field — uses an overlay to avoid touching the input's styles */
-function glowField(el: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement) {
+function glowField(el: HTMLElement) {
   const rect = el.getBoundingClientRect();
+  if (import.meta.env.DEV) {
+    console.info('[JobFill FX] glowField', {
+      tag: el.tagName.toLowerCase(),
+      type: el instanceof HTMLInputElement ? el.type : undefined,
+      width: Math.round(rect.width),
+      height: Math.round(rect.height),
+      left: Math.round(rect.left),
+      top: Math.round(rect.top),
+      connected: el.isConnected,
+      zeroSize: rect.width === 0 || rect.height === 0,
+      stylesInjected: Boolean(document.getElementById('jf-fill-styles')),
+      hasBody: Boolean(document.body),
+      hidden: document.hidden,
+    });
+  }
   const glow = document.createElement('div');
   glow.style.cssText = `
     position: absolute;
@@ -918,6 +1055,13 @@ async function fillFieldsPass(mappings: FieldMapping[]): Promise<AutofillResult>
   }
 
   // ---- Phase 1 (sync, ~0ms): Write ALL values instantly ----
+  // Start watching DOM mutations BEFORE Phase 1 so synchronous or microtask re-renders
+  // triggered by select, radio, or checkbox changes (Degree -> Major, Visa Yes/No, etc.)
+  // are captured even if they fire mid-loop.
+  const formWatch = toFill.some(({ el }) => el instanceof HTMLSelectElement || (el instanceof HTMLInputElement && (el.type === 'radio' || el.type === 'checkbox')))
+    ? startFormWatch()
+    : null;
+
   // No timeouts — React/Angular/Vue validators cannot clear values mid-cascade
   // because blur is intentionally skipped here.
   const filled: FillItem[] = [];
@@ -986,16 +1130,16 @@ async function fillFieldsPass(mappings: FieldMapping[]): Promise<AutofillResult>
   const filledCount = filled.length;
   const ANIM_STAGGER = 60;
 
-  // ---- Phase 1.5: Re-scan after select/dropdown changes ----
-  // When selects (Country, State, Phone Type, etc.) are filled, the form may
-  // dynamically add/remove fields or swap dropdown options.
-  // Examples:
-  //   - Country → US to India: adds "Local Given Name", "Local Family Name"
-  //   - Country → India: State dropdown gets Indian states (Karnataka matches)
-  // Strategy: wait for React re-render, re-scan, fill newly-appeared fields.
-  const filledSelects = filled.filter(({ el }) => el instanceof HTMLSelectElement);
+  // ---- Phase 1.5: Re-scan after select/radio/checkbox changes ----
+  // When choice controls (Degree, Country, Visa Yes/No, etc.) are filled, the form may
+  // dynamically add/remove fields or swap dropdown options (e.g. Field of Study, State).
+  // Strategy: observe DOM mutations to detect when the form finishes re-rendering,
+  // then re-scan and fill newly-appeared fields or updated option lists.
+  const filledChoiceControls = filled.filter(({ el }) =>
+    el instanceof HTMLSelectElement || (el instanceof HTMLInputElement && (el.type === 'radio' || el.type === 'checkbox')),
+  );
 
-  if (filledSelects.length > 0) {
+  if (filledChoiceControls.length > 0 && formWatch) {
     // Build profileField → value lookup from ALL original mappings
     // so we can resolve values for newly-discovered fields
     const valueByProfile: Record<string, string> = {};
@@ -1007,8 +1151,17 @@ async function fillFieldsPass(mappings: FieldMapping[]): Promise<AutofillResult>
 
     const originalSelectors = new Set(mappings.map((m) => m.selector));
 
-    await new Promise((resolve) => setTimeout(resolve, 800));
-    {
+    // Universal cascade detection: if ANY mapping from the user's profile is still missing
+    // or unsatisfied (e.g. Field of Study, State, Visa details), allow 300ms for async
+    // options or dynamic fields to mount. If all fields are already satisfied, settle in 100ms.
+    const hasUnsatisfiedMappings = mappings.some((m) => !isMappingSatisfied(m));
+    const quietMs = hasUnsatisfiedMappings ? 300 : 100;
+    const settleStart = performance.now();
+    const domChanged = await formWatch.settle(quietMs, 800);
+    console.info(`[JobFill] Cascade settle: ${(performance.now() - settleStart).toFixed(0)}ms, domChanged=${domChanged}, hasUnsatisfied=${hasUnsatisfiedMappings}`);
+
+    // Only run the expensive re-scan if the DOM actually changed
+    if (domChanged) {
       const newFilled: FillItem[] = [];
 
       // --- Pass A: Retry ORIGINAL selects that failed in Phase 1 ---
@@ -1098,16 +1251,29 @@ async function fillFieldsPass(mappings: FieldMapping[]): Promise<AutofillResult>
           }, idx * ANIM_STAGGER);
         });
       }
+    } else {
+      console.info('[JobFill] Select settle: DOM unchanged, skipping re-scan');
     }
+  } else {
+    formWatch?.stop();
   }
 
   // ---- Phase 2 (async, visual only): Stagger animations at 60ms ----
   // Data is already in the DOM — this is pure eye candy.
-  // IMPORTANT: When selects (Country, etc.) were filled in Phase 1, React may
-  // re-render the form ~200ms later — adding/removing fields and shifting
-  // positions. We delay Phase 2 by 400ms in that case so getBoundingClientRect()
-  // measures FINAL positions, not pre-re-render ones.
-  const PHASE2_DELAY = filledSelects.length > 0 ? 400 : 0;
+  // Only delay animation measurements when the DOM actually changed after
+  // select fills, so positions reflect final layout. Otherwise start immediately.
+  const PHASE2_DELAY = 0;
+
+  if (import.meta.env.DEV) {
+    console.info('[JobFill FX] Phase 2 scheduling animations', {
+      mappings: mappings.length,
+      toFill: toFill.length,
+      filled: filledCount,
+      skippedExisting: skippedExistingCount,
+      errors: errorCount,
+      willAnimate: filledCount > 0,
+    });
+  }
 
   filled.forEach(({ el }, idx) => {
     setTimeout(() => {
@@ -1128,6 +1294,7 @@ async function fillFieldsPass(mappings: FieldMapping[]): Promise<AutofillResult>
   const lastAnimEnd = filledCount > 0 ? PHASE2_DELAY + (filledCount - 1) * ANIM_STAGGER + 80 : 0;
 
   setTimeout(() => {
+    if (import.meta.env.DEV) console.info('[JobFill FX] pageCompleteFlash', { filledCount, fired: filledCount > 0 });
     if (filledCount > 0) pageCompleteFlash();
   }, lastAnimEnd);
 
@@ -1147,8 +1314,13 @@ async function fillAndRetryMissing(mappings: FieldMapping[]): Promise<AutofillRe
   const firstPass = await fillFieldsPass(mappings);
   if (mappings.length === 0) return firstPass;
 
-  await new Promise((resolve) => setTimeout(resolve, 500));
-  const missingMappings = mappings.filter((mapping) => !isMappingSatisfied(mapping));
+  // Progressive verification: check after one frame (~16ms), then back off
+  // with increasing delays only for fields that are still missing.
+  // Typical case: all fields stick → returns in ~16ms instead of the old blind 500ms.
+  const verifyStart = performance.now();
+  const missingMappings = await findMissingMappings(mappings);
+  console.info(`[JobFill] Verify: ${(performance.now() - verifyStart).toFixed(0)}ms, missing=${missingMappings.length}/${mappings.length}`);
+
   if (missingMappings.length === 0) return firstPass;
 
   console.info(`[JobFill] Resweep: retrying ${missingMappings.length} of ${mappings.length} fields still missing after fill`);
@@ -1168,6 +1340,10 @@ async function fillAndRetryMissing(mappings: FieldMapping[]): Promise<AutofillRe
 }
 
 export function fillFields(mappings: FieldMapping[]): Promise<AutofillResult> {
+  if (import.meta.env.DEV) {
+    console.info('[JobFill FX] fillFields called', { mappings: mappings.length, frameIsTop: window.self === window.top });
+  }
+
   const operation = fillQueue.then(() => withScrollLock(() => fillAndRetryMissing(mappings)));
   fillQueue = operation.then(() => undefined, () => undefined);
   return operation;

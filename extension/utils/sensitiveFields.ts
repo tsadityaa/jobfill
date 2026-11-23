@@ -58,8 +58,9 @@ export const SENSITIVE_PATTERNS: RegExp[] = [
   /ctc/i,
 
   // Demographic (EEO)
-  /\bgender\b/i,
-  /\bsex\b/i,
+  // Note: gender/sex are intentionally NOT listed. They map to the profile's
+  // personal.gender (same as the dropdown/radio pipelines) so local synonym
+  // matching can fill them.
   /\brace\b/i,
   /\bethnicity\b/i,
   /sexual\s*orientation/i,

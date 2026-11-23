@@ -158,7 +158,7 @@ export default defineConfig({
     description: 'Your secure personal application assistant. Store details, autofill forms, manage documents.',
     version: '0.1.1',
     action: { default_title: 'MemoraFill' },
-    permissions: ['storage', 'unlimitedStorage', 'activeTab', 'scripting', 'webNavigation', 'identity'],
+    permissions: ['storage', 'unlimitedStorage', 'activeTab', 'scripting', 'webNavigation', 'identity', 'clipboardWrite'],
     host_permissions: ['<all_urls>', 'https://eneyoicwuqjdaonccqkm.supabase.co/*'],
     web_accessible_resources: [
       { resources: ['popup.html', 'assets/*', 'chunks/*'], matches: ['<all_urls>'] },

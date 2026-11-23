@@ -1,7 +1,8 @@
 export interface Env {
   SUPABASE_URL: string;
   SUPABASE_ANON_KEY: string;
-  OPENROUTER_API_KEY: string;
+  AGENTROUTER_API_KEY: string;
+  AGENTROUTER_MODEL?: string;
   SUPERMEMORY_API_KEY?: string;
   PDFCO_API_KEY?: string;
 }
@@ -10,10 +11,9 @@ interface AuthenticatedUser {
   id: string;
 }
 
-const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
+const AGENTROUTER_URL = 'https://agentrouter.org/v1/responses';
 const SUPERMEMORY_URL = 'https://api.supermemory.ai';
 const PDFCO_URL = 'https://api.pdf.co/v1';
-const OPENROUTER_MODELS = new Set(['openai/gpt-4o-mini']);
 const PDFCO_ENDPOINTS = new Set([
   '/pdf/optimize',
   '/pdf/merge2',
@@ -40,7 +40,8 @@ function isAllowedOrigin(origin: string): boolean {
 function corsHeaders(origin: string | null): Headers {
   const headers = new Headers({
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Authorization, Content-Type',
+    'Access-Control-Allow-Headers': 'Authorization, Content-Type, X-Request-ID',
+    'Access-Control-Expose-Headers': 'X-Request-ID',
     'Access-Control-Max-Age': '86400',
     'Cache-Control': 'no-store',
     Vary: 'Origin',
@@ -49,16 +50,18 @@ function corsHeaders(origin: string | null): Headers {
   return headers;
 }
 
-function jsonResponse(request: Request, payload: unknown, status = 200): Response {
+function jsonResponse(request: Request, payload: unknown, status = 200, requestId?: string): Response {
   const headers = corsHeaders(request.headers.get('Origin'));
   headers.set('Content-Type', 'application/json; charset=utf-8');
+  if (requestId) headers.set('X-Request-ID', requestId);
   return new Response(JSON.stringify(payload), { status, headers });
 }
 
-function proxyResponse(request: Request, upstream: Response): Response {
+function proxyResponse(request: Request, upstream: Response, requestId?: string): Response {
   const headers = corsHeaders(request.headers.get('Origin'));
   const contentType = upstream.headers.get('Content-Type');
   if (contentType) headers.set('Content-Type', contentType);
+  if (requestId) headers.set('X-Request-ID', requestId);
   return new Response(upstream.body, { status: upstream.status, headers });
 }
 
@@ -87,34 +90,226 @@ async function authenticate(request: Request, env: Env): Promise<AuthenticatedUs
   return typeof user.id === 'string' && user.id ? { id: user.id } : null;
 }
 
-async function handleOpenRouter(request: Request, env: Env): Promise<Response> {
+async function handleAgentRouter(request: Request, env: Env): Promise<Response> {
   if (request.method !== 'POST') return jsonResponse(request, { error: 'Method not allowed.' }, 405);
-  if (!env.OPENROUTER_API_KEY) return jsonResponse(request, { error: 'OpenRouter is not configured.' }, 503);
+  if (!env.AGENTROUTER_API_KEY) return jsonResponse(request, { error: 'Agent Router is not configured.' }, 503);
 
   const payload = await readJson(request);
   if (!payload || !Array.isArray(payload.messages) || payload.messages.length === 0 || payload.messages.length > 100) {
     return jsonResponse(request, { error: 'Invalid chat-completion request.' }, 400);
   }
-  if (typeof payload.model !== 'string' || !OPENROUTER_MODELS.has(payload.model)) {
+  const model = env.AGENTROUTER_MODEL || 'gpt-5.6-sol';
+  if (typeof payload.model !== 'string' || payload.model !== model) {
     return jsonResponse(request, { error: 'Requested model is not allowed.' }, 400);
   }
 
+  const messages = payload.messages as Array<Record<string, unknown>>;
+  if (messages.some((message) => !['system', 'developer', 'user', 'assistant'].includes(String(message?.role))
+    || typeof message?.content !== 'string')) {
+    return jsonResponse(request, { error: 'Invalid chat-completion messages.' }, 400);
+  }
+  const instructions = messages
+    .filter((message) => message.role === 'system' || message.role === 'developer')
+    .map((message) => message.content as string)
+    .join('\n\n');
+  const input = messages
+    .filter((message) => message.role === 'user' || message.role === 'assistant')
+    .map((message) => ({ role: message.role, content: message.content }));
+  if (input.length === 0) return jsonResponse(request, { error: 'At least one user or assistant message is required.' }, 400);
+
+  const requestPurpose = typeof payload.purpose === 'string' ? payload.purpose : 'unspecified';
+  // Resume extraction can need a larger completion budget because reasoning
+  // tokens count against max_output_tokens too. Keep other AI tasks capped.
+  const outputTokenCap = requestPurpose === 'resume-parse' ? 16384 : 4096;
   const maxTokens = typeof payload.max_tokens === 'number'
-    ? Math.max(1, Math.min(Math.floor(payload.max_tokens), 4096))
+    ? Math.max(1, Math.min(Math.floor(payload.max_tokens), outputTokenCap))
     : 1024;
-  const safePayload = { ...payload, max_tokens: maxTokens, stream: false };
-  const upstream = await fetch(OPENROUTER_URL, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${env.OPENROUTER_API_KEY}`,
-      'Content-Type': 'application/json',
-      'HTTP-Referer': 'https://jobfill.app',
-      'X-Title': 'JobFill',
+  const reasoningEffort = requestPurpose === 'resume-parse'
+    ? 'none'
+    : payload.reasoning_effort === 'none' || payload.reasoning_effort === 'low'
+      ? payload.reasoning_effort
+      : undefined;
+  const upstreamTimeoutMs = requestPurpose === 'resume-parse' ? 180_000 : 60_000;
+  const requestBody: Record<string, unknown> = {
+    model,
+    instructions,
+    input,
+    max_output_tokens: maxTokens,
+    stream: false,
+    ...(reasoningEffort ? { reasoning: { effort: reasoningEffort } } : {}),
+  };
+  // Callers still pass temperature, but Agent Router rejects it for gpt-5.6-sol,
+  // so omit it from the upstream request.
+  // JSON-only prompts already instruct the model to return JSON. Agent Router
+  // rejects json_object mode unless the user input itself contains "json".
+
+  const suppliedRequestId = request.headers.get('X-Request-ID');
+  const requestId = suppliedRequestId && /^[A-Za-z0-9-]{1,80}$/.test(suppliedRequestId)
+    ? suppliedRequestId
+    : crypto.randomUUID();
+  const startedAt = Date.now();
+  const inputCharacters = messages.reduce((total, message) => total + (message.content as string).length, 0);
+  console.info('[AgentRouter] upstream request ' + JSON.stringify({
+    id: requestId,
+    model,
+    purpose: requestPurpose,
+    endpoint: '/v1/responses',
+    maxOutputTokens: maxTokens,
+    reasoningEffort: reasoningEffort ?? 'provider-default',
+    upstreamTimeoutMs,
+    inputMessages: messages.length,
+    inputCharacters,
+  }));
+  let upstream: Response;
+  try {
+    upstream = await fetch(AGENTROUTER_URL, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${env.AGENTROUTER_API_KEY}`,
+        'Content-Type': 'application/json',
+        'User-Agent': 'codex_cli_rs/0.101.0 (Mac OS; arm64)',
+        Originator: 'codex_cli_rs',
+        Version: '0.101.0',
+      },
+      body: JSON.stringify(requestBody),
+      signal: AbortSignal.timeout(upstreamTimeoutMs),
+    });
+  } catch (error) {
+    const errorName = error instanceof Error ? error.name : 'UnknownError';
+    const timedOut = errorName === 'TimeoutError' || errorName === 'AbortError';
+    console.error('[AgentRouter] upstream call failed ' + JSON.stringify({
+      id: requestId,
+      model,
+      purpose: requestPurpose,
+      durationMs: Date.now() - startedAt,
+      timeoutMs: upstreamTimeoutMs,
+      error: errorName,
+    }));
+    return jsonResponse(request, {
+      error: timedOut
+        ? (requestPurpose === 'resume-parse'
+          ? 'Resume parsing timed out while waiting for Agent Router. Please try again or fill manually.'
+          : 'Agent Router timed out. Please try again.')
+        : 'Could not connect to Agent Router. Please try again.',
+    }, timedOut ? 504 : 502, requestId);
+  }
+  if (!upstream.ok) {
+    console.warn('[AgentRouter] upstream response ' + JSON.stringify({
+      id: requestId,
+      model,
+      purpose: requestPurpose,
+      status: upstream.status,
+      durationMs: Date.now() - startedAt,
+      inputMessages: input.length,
+    }));
+    return proxyResponse(request, upstream, requestId);
+  }
+
+  let data: Record<string, unknown>;
+  try {
+    data = await upstream.json() as Record<string, unknown>;
+  } catch (error) {
+    console.error('[AgentRouter] upstream response invalid-json ' + JSON.stringify({
+      id: requestId,
+      model,
+      status: upstream.status,
+      durationMs: Date.now() - startedAt,
+      error: error instanceof Error ? error.name : 'UnknownError',
+    }));
+    return jsonResponse(request, { error: 'Agent Router returned an invalid response.' }, 502, requestId);
+  }
+  const output = Array.isArray(data.output) ? data.output as Array<Record<string, unknown>> : [];
+  const outputText = typeof data.output_text === 'string' ? data.output_text.trim() : '';
+  const responseOutputText = output
+    .filter((item) => item.type === 'message' && Array.isArray(item.content))
+    .flatMap((item) => (item.content as Array<Record<string, unknown>>)
+      .filter((part) => typeof part.text === 'string')
+      .map((part) => part.text as string))
+    .join('')
+    .trim();
+  // Some OpenAI-compatible gateways return Chat Completions-shaped responses
+  // even on /responses. Accept that shape too, and never let an empty
+  // output_text mask usable text in another response field.
+  const choices = Array.isArray(data.choices) ? data.choices as Array<Record<string, unknown>> : [];
+  const firstChoice = choices[0];
+  const firstMessage = firstChoice?.message && typeof firstChoice.message === 'object'
+    ? firstChoice.message as Record<string, unknown>
+    : {};
+  const choiceContent = typeof firstMessage.content === 'string'
+    ? firstMessage.content.trim()
+    : Array.isArray(firstMessage.content)
+      ? (firstMessage.content as Array<Record<string, unknown>>)
+        .filter((part) => typeof part.text === 'string')
+        .map((part) => part.text as string)
+        .join('')
+        .trim()
+      : '';
+  const text = outputText || responseOutputText || choiceContent;
+  const usage = data.usage && typeof data.usage === 'object'
+    ? data.usage as Record<string, unknown>
+    : {};
+  const outputTokenDetails = usage.output_tokens_details && typeof usage.output_tokens_details === 'object'
+    ? usage.output_tokens_details as Record<string, unknown>
+    : {};
+  const completionTokenDetails = usage.completion_tokens_details && typeof usage.completion_tokens_details === 'object'
+    ? usage.completion_tokens_details as Record<string, unknown>
+    : {};
+  const inputTokens = usage.input_tokens ?? usage.prompt_tokens ?? null;
+  const outputTokens = usage.output_tokens ?? usage.completion_tokens ?? null;
+  const reasoningTokens = outputTokenDetails.reasoning_tokens ?? completionTokenDetails.reasoning_tokens ?? null;
+  if (!text) {
+    const incompleteDetails = data.incomplete_details && typeof data.incomplete_details === 'object'
+      ? data.incomplete_details as Record<string, unknown>
+      : {};
+    const incompleteReason = typeof incompleteDetails.reason === 'string' ? incompleteDetails.reason : null;
+    console.warn('[AgentRouter] successful response contained no assistant text ' + JSON.stringify({
+      id: requestId,
+      model,
+      purpose: requestPurpose,
+      endpoint: '/v1/responses',
+      status: upstream.status,
+      responseStatus: data.status ?? null,
+      incompleteReason,
+      durationMs: Date.now() - startedAt,
+      outputTextLength: outputText.length,
+      outputTypes: output.map((item) => item.type ?? 'unknown'),
+      // Shows what the empty "message" item actually contained (for example output_text with empty text, or refusal).
+      outputContentTypes: output.flatMap((item) => Array.isArray(item.content)
+        ? (item.content as Array<Record<string, unknown>>).map((part) => part.type ?? 'unknown')
+        : []),
+      choiceCount: choices.length,
+      finishReason: firstChoice?.finish_reason ?? null,
+      inputTokens,
+      outputTokens,
+      reasoningTokens,
+    }));
+    const error = incompleteReason === 'max_output_tokens' || firstChoice?.finish_reason === 'length'
+      ? 'Agent Router reached the output token limit before returning resume data. Please retry.'
+      : 'Agent Router returned no assistant text. Please retry.';
+    return jsonResponse(request, { error }, 502, requestId);
+  }
+  console.info('[AgentRouter] upstream response ' + JSON.stringify({
+    id: requestId,
+    model,
+    purpose: requestPurpose,
+    status: upstream.status,
+    durationMs: Date.now() - startedAt,
+    inputMessages: input.length,
+    inputTokens: usage.input_tokens ?? null,
+    outputTokens: usage.output_tokens ?? null,
+  }));
+  return jsonResponse(request, {
+    id: data.id ?? '',
+    object: 'chat.completion',
+    created: Math.floor(Date.now() / 1000),
+    model,
+    choices: [{ index: 0, message: { role: 'assistant', content: text }, finish_reason: 'stop' }],
+    usage: {
+      prompt_tokens: inputTokens ?? 0,
+      completion_tokens: outputTokens ?? 0,
+      total_tokens: usage.total_tokens ?? 0,
     },
-    body: JSON.stringify(safePayload),
-    signal: AbortSignal.timeout(60_000),
-  });
-  return proxyResponse(request, upstream);
+  }, 200, requestId);
 }
 
 async function handleMemory(request: Request, url: URL, user: AuthenticatedUser, env: Env): Promise<Response> {
@@ -209,7 +404,7 @@ export default {
     try {
       const user = await authenticate(request, env);
       if (!user) return jsonResponse(request, { error: 'A valid JobFill session is required.' }, 401);
-      if (url.pathname === '/api/openrouter') return await handleOpenRouter(request, env);
+      if (url.pathname === '/api/agentrouter') return await handleAgentRouter(request, env);
       if (url.pathname.startsWith('/api/memory/')) return await handleMemory(request, url, user, env);
       if (url.pathname === '/api/pdfco') return await handlePdfCo(request, url, env);
       if (url.pathname === '/api/pdfco/upload') return await handlePdfCo(request, url, env);

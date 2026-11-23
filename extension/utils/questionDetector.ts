@@ -29,7 +29,8 @@ export function isApplicationQuestionCandidate(
     || /other_option_response/i.test(field.attributes.name ?? '');
   if (isOtherChoiceInput) return false;
 
-  const isTextarea = field.tagName.toLowerCase() === 'textarea' || field.inputType.toLowerCase() === 'textarea';
+  const isTextarea = field.tagName.toLowerCase() === 'textarea'
+    || field.inputType.toLowerCase() === 'textarea';
   if (isTextarea) return true;
   if (!TEXT_INPUT_TYPES.has(field.inputType.toLowerCase())) return false;
 

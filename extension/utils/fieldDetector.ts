@@ -456,11 +456,44 @@ export function queryAcrossOpenShadowRoots<T extends Element>(selector: string):
 }
 
 /**
+ * DEV-only counters for measuring PRESCAN label cost. Not updated in production builds.
+ * `calls` = getLabelText invocations; `ancestorWalks` = invocations that reached the
+ * last-resort ancestor-walk branch (the expensive querySelectorAll path).
+ */
+export const labelStats = { calls: 0, ancestorWalks: 0 };
+
+/**
+ * Optional per-scan memo for getLabelText. PRESCAN runs three passes over the same
+ * elements (field scan, AI-sanitised extraction, fingerprint); inside a scope they share
+ * one label computation per element. Outside a scope nothing is cached, so user typing
+ * or DOM changes can never be served a stale label.
+ */
+let labelMemo: WeakMap<HTMLElement, string | undefined> | null = null;
+
+/** Open a label-memo scope. Always pair with endLabelMemoScope() in a finally block. */
+export function beginLabelMemoScope(): void {
+  labelMemo = new WeakMap();
+}
+
+export function endLabelMemoScope(): void {
+  labelMemo = null;
+}
+
+/**
  * Get the label text associated with a form element.
  * Handles standard labels, aria attributes, AND non-standard patterns
  * like Google Forms (where labels are divs/spans in ancestor containers).
  */
 export function getLabelText(el: HTMLElement): string | undefined {
+  if (import.meta.env.DEV) labelStats.calls++;
+  const memo = labelMemo;
+  if (memo?.has(el)) return memo.get(el);
+  const label = computeLabelText(el);
+  memo?.set(el, label);
+  return label;
+}
+
+function computeLabelText(el: HTMLElement): string | undefined {
   const root = el.getRootNode();
   const queryRoot = root instanceof ShadowRoot ? root : document;
 
@@ -512,6 +545,7 @@ export function getLabelText(el: HTMLElement): string | undefined {
   // 6. Walk up ancestors to find the closest "question container"
   //    This handles Google Forms, Typeform, custom React forms, etc.
   //    where the label is in a sibling/cousin div, not a <label> tag.
+  if (import.meta.env.DEV) labelStats.ancestorWalks++;
   let ancestor: HTMLElement | null = el.parentElement;
   if (!ancestor && root instanceof ShadowRoot) ancestor = root.host as HTMLElement;
   let depth = 0;
@@ -599,7 +633,7 @@ export function scanPageFields(): DetectedField[] {
     if (w < 200 || h < 100) return [];
   }
 
-  const elements = queryAcrossOpenShadowRoots<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>(FILLABLE_FIELDS_SELECTOR);
+  const elements = queryAcrossOpenShadowRoots<HTMLElement>(FILLABLE_FIELDS_SELECTOR);
 
   const detected: DetectedField[] = [];
 
@@ -629,7 +663,12 @@ export function scanPageFields(): DetectedField[] {
       accept: el instanceof HTMLInputElement ? el.getAttribute('accept') || undefined : undefined,
     };
 
-    const inputType = el instanceof HTMLInputElement ? (el.type || 'text') : el.tagName.toLowerCase();
+    const isRichTextEntry = el.getAttribute('role') === 'textbox' || el.isContentEditable;
+    const inputType = el instanceof HTMLInputElement
+      ? (el.type || 'text')
+      : el instanceof HTMLTextAreaElement || isRichTextEntry
+        ? 'textarea'
+        : el.tagName.toLowerCase();
 
     // Check for sensitive fields first
     const allTexts = [
@@ -650,7 +689,9 @@ export function scanPageFields(): DetectedField[] {
         profileField: null,
         confidence: 0,
         category: 'USER_DECISION_REQUIRED',
-        currentValue: el.value || '',
+        currentValue: el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
+          ? el.value
+          : el.innerText || el.textContent || '',
       });
       continue;
     }
@@ -669,7 +710,11 @@ export function scanPageFields(): DetectedField[] {
       continue;
     }
 
-    const currentValue = el.value || '';
+    const currentValue = el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
+      ? el.value
+      : isRichTextEntry
+        ? (el.innerText || el.textContent || '')
+        : '';
     const match = matchField(attributes, inputType);
     const isApplicationQuestion = !match && isApplicationQuestionCandidate({
       tagName: el.tagName.toLowerCase(),
@@ -693,20 +738,29 @@ export function scanPageFields(): DetectedField[] {
 }
 
 const FILLABLE_FIELDS_SELECTOR =
-  'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"]), select, textarea';
+  'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"]), select, textarea, [role="textbox"], [contenteditable="true"]';
 
-export function hasVisibleFormFields(): boolean {
-  if (window.self !== window.top && (window.innerWidth < 200 || window.innerHeight < 100)) return false;
+export function countVisibleFormFields(): number {
+  if (window.self !== window.top && (window.innerWidth < 200 || window.innerHeight < 100)) return 0;
   const elements = queryAcrossOpenShadowRoots<HTMLElement>(FILLABLE_FIELDS_SELECTOR);
-  if (elements.some((element) =>
-    isRenderedField(element)
-    || (element instanceof HTMLInputElement && element.type === 'file' && Boolean(getVisibleFileInputLabel(element))),
-  )) return true;
+  let count = 0;
+  for (const element of elements) {
+    if (isRenderedField(element) || (element instanceof HTMLInputElement && element.type === 'file' && Boolean(getVisibleFileInputLabel(element)))) {
+      count++;
+    }
+  }
 
   const workdayDropdowns = queryAcrossOpenShadowRoots<HTMLElement>(
     '[data-automation-id^="formField-"] [aria-haspopup="listbox"]',
   );
-  return workdayDropdowns.some(isRenderedField);
+  for (const element of workdayDropdowns) {
+    if (isRenderedField(element)) count++;
+  }
+  return count;
+}
+
+export function hasVisibleFormFields(): boolean {
+  return countVisibleFormFields() > 0;
 }
 
 function getVisibleFileInputLabel(input: HTMLInputElement): string | undefined {
@@ -791,8 +845,8 @@ export function extractSanitizedFields(): {
     if (w < 200 || h < 100) return { sanitizedFields: [], selectorLookup: {} };
   }
 
-  const elements = queryAcrossOpenShadowRoots<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>(
-    'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"]):not([type="file"]), select, textarea',
+  const elements = queryAcrossOpenShadowRoots<HTMLElement>(
+    'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"]):not([type="file"]), select, textarea, [role="textbox"], [contenteditable="true"]',
   );
 
   const sanitizedFields: SanitizedField[] = [];
@@ -810,7 +864,11 @@ export function extractSanitizedFields(): {
     const sanitized: SanitizedField = {
       fieldId,
       tag: el.tagName.toLowerCase(),
-      type: el instanceof HTMLInputElement ? (el.type || 'text') : el.tagName.toLowerCase(),
+      type: el instanceof HTMLInputElement
+        ? (el.type || 'text')
+        : el instanceof HTMLTextAreaElement || el.getAttribute('role') === 'textbox' || el.isContentEditable
+          ? 'textarea'
+          : el.tagName.toLowerCase(),
     };
 
     // Label text (safe — it's the visible form label, not user data)

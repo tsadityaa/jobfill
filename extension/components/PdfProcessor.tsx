@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo, useEffect, type ReactElement } from 'react';
+import { useState, useCallback, useMemo, useEffect, useRef, type ReactElement } from 'react';
 import { createPortal } from 'react-dom';
 import type { StoredDocument } from '../types/document';
 import { formatFileSize } from '../types/document';
@@ -6,9 +6,6 @@ import {
   uploadToPdfCo,
   downloadResult,
   compressPdf,
-  mergePdfs,
-  splitPdf,
-  rotatePdf,
   protectPdf,
   unlockPdf,
   wordToPdf,
@@ -19,38 +16,37 @@ import {
   addPageNumbers,
   deletePdfPages,
   getPdfInfo,
-  saveExtraKey,
-  getExtraKeys,
-  removeExtraKey,
 } from '../utils/pdfco';
-import { cloudLoadDocumentBlob as loadDocumentBlob, cloudLoadAllDocumentMetadata as loadAllDocumentMetadata } from '../utils/cloudStorage';
+import { RotateView, SplitView, MergeView, BusySpinner } from './PdfPageViews';
+import { openPdf, closePdf, renderPageToDataUrl, pagesToRangeString, type PdfHandle } from '../utils/pdfPages';
+import { cloudLoadDocumentBlob as loadDocumentBlob } from '../utils/cloudStorage';
 
 interface PdfProcessorProps {
   doc: StoredDocument;
   onClose: () => void;
 }
 
-type TabId = 'compress' | 'convert' | 'edit' | 'protect' | 'ocr' | 'info' | 'settings';
+type TabId = 'compress' | 'convert' | 'edit' | 'protect' | 'ocr' | 'info';
 
-/* SVG icon components for the glass tab bar */
+/* SVG icon components for the glass tab bar matching reference image 1:1 */
 const TabIcons: Record<TabId, ReactElement> = {
   compress: (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
       <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
       <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
       <line x1="12" y1="22.08" x2="12" y2="12" />
     </svg>
   ),
   convert: (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
-      <path d="M3 3v5h5" />
-      <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" />
-      <path d="M21 21v-5h-5" />
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M8 7h8a3 3 0 0 1 3 3v1" />
+      <polyline points="10 5 8 7 10 9" />
+      <path d="M16 17H8a3 3 0 0 1-3-3v-1" />
+      <polyline points="14 19 16 17 14 15" />
     </svg>
   ),
   edit: (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
       <circle cx="6" cy="6" r="3" /><circle cx="6" cy="18" r="3" />
       <line x1="20" y1="4" x2="8.12" y2="15.88" />
       <line x1="14.47" y1="14.48" x2="20" y2="20" />
@@ -58,28 +54,22 @@ const TabIcons: Record<TabId, ReactElement> = {
     </svg>
   ),
   protect: (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-      <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
-      <path d="M7 11V7a5 5 0 0110 0v4" />
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="4" y="10" width="16" height="12" rx="2.5" />
+      <path d="M7 10V7a5 5 0 0 1 10 0v3" />
       <path d="M12 14v4M10 16h4" />
     </svg>
   ),
   ocr: (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-      <circle cx="10.5" cy="10.5" r="7.5" /><line x1="21" y1="21" x2="15.8" y2="15.8" />
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="10.5" cy="10.5" r="7" /><line x1="21" y1="21" x2="15.5" y2="15.5" />
     </svg>
   ),
   info: (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-      <rect x="3" y="3" width="18" height="18" rx="4" />
-      <line x1="12" y1="16" x2="12" y2="11" />
-      <line x1="12" y1="8" x2="12.01" y2="8" />
-    </svg>
-  ),
-  settings: (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-      <circle cx="12" cy="12" r="3" />
-      <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9c.26.604.852.997 1.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z" />
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="4" y="3" width="16" height="18" rx="4" />
+      <line x1="12" y1="15" x2="12" y2="11" />
+      <circle cx="12" cy="8" r="0.75" fill="currentColor" />
     </svg>
   ),
 };
@@ -91,13 +81,12 @@ const TAB_LABELS: Record<TabId, string> = {
   protect: 'Protect',
   ocr: 'OCR',
   info: 'Info',
-  settings: 'Keys',
 };
 
-const TAB_ORDER: TabId[] = ['compress', 'convert', 'edit', 'protect', 'ocr', 'info', 'settings'];
+const TAB_ORDER: TabId[] = ['compress', 'convert', 'edit', 'protect', 'ocr', 'info'];
 
 export default function PdfProcessor({ doc, onClose }: PdfProcessorProps) {
-  const [activeTab, setActiveTab] = useState<TabId>('convert');
+  const [activeTab, setActiveTab] = useState<TabId>('compress');
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<{ type: 'success' | 'error' | 'info'; msg: string } | null>(null);
   const [previewResult, setPreviewResult] = useState<PreviewResult | null>(null);
@@ -173,7 +162,7 @@ export default function PdfProcessor({ doc, onClose }: PdfProcessorProps) {
         {/* Header */}
         <div className="pdf-proc-header">
           <div className="pdf-proc-header-left">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#ffffff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ filter: 'drop-shadow(0 0 8px rgba(255,255,255,0.4))' }}>
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#ffffff" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ filter: 'drop-shadow(0 0 8px rgba(255,255,255,0.45))' }}>
               <circle cx="12" cy="12" r="3" />
               <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
             </svg>
@@ -182,7 +171,12 @@ export default function PdfProcessor({ doc, onClose }: PdfProcessorProps) {
               <div className="pdf-proc-subtitle" title={doc.originalName}>{doc.originalName}</div>
             </div>
           </div>
-          <button className="pdf-proc-close-btn" onClick={onClose}>✕</button>
+          <button className="pdf-proc-close-btn" onClick={onClose} aria-label="Close">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+              <line x1="18" y1="6" x2="6" y2="18" />
+              <line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </button>
         </div>
 
         {/* Tab bar — glass pill strip */}
@@ -213,7 +207,7 @@ export default function PdfProcessor({ doc, onClose }: PdfProcessorProps) {
 
           {/* ===== COMPRESS ===== */}
           {activeTab === 'compress' && (
-            <CompressTab doc={doc} base={base} busy={busy} run={run} processAndPreview={processAndPreview} storeResult={storeResult} />
+            <CompressTab doc={doc} base={base} busy={busy} run={run} setStatus={setStatus} loadDocumentBlob={loadDocumentBlob} />
           )}
 
           {/* ===== CONVERT ===== */}
@@ -249,11 +243,6 @@ export default function PdfProcessor({ doc, onClose }: PdfProcessorProps) {
           {/* ===== INFO ===== */}
           {activeTab === 'info' && (
             <InfoTab doc={doc} busy={busy} setBusy={setBusy} setStatus={setStatus} loadDocumentBlob={loadDocumentBlob} />
-          )}
-
-          {/* ===== SETTINGS ===== */}
-          {activeTab === 'settings' && (
-            <SettingsTab setStatus={setStatus} />
           )}
 
           {/* ===== RESULT PREVIEW ===== */}
@@ -389,43 +378,99 @@ function ResultPreview({ result, setResult }: { result: PreviewResult; setResult
 }
 
 // ---- Compress ----
-function CompressTab({ doc, base, busy, run, processAndPreview }: OperationTabProps) {
+function CompressTab({
+  doc,
+  base,
+  busy,
+  run,
+  setStatus,
+  loadDocumentBlob: loadBlob,
+}: Omit<OperationTabProps, 'processAndPreview'>) {
   const [level, setLevel] = useState<'low' | 'medium' | 'high'>('medium');
+  const [compressedBlob, setCompressedBlob] = useState<Blob | null>(null);
   const isPdf = doc.mimeType === 'application/pdf';
+  const originalSize = doc.sizeBytes;
+  const compressedSize = compressedBlob?.size;
+  const savedPercent = compressedSize == null || originalSize <= 0
+    ? null
+    : Math.round(((originalSize - compressedSize) / originalSize) * 100);
+
+  const compress = async () => {
+    if (!loadBlob || !setStatus) return;
+    setCompressedBlob(null);
+    setStatus({ type: 'info', msg: 'Uploading PDF…' });
+    const blob = await loadBlob(doc.id);
+    const uploadedUrl = await uploadToPdfCo(blob, doc.originalName);
+    setStatus({ type: 'info', msg: 'Compressing PDF…' });
+    const resultUrl = await compressPdf(uploadedUrl, level);
+    const resultBlob = await downloadResult(resultUrl);
+    setCompressedBlob(resultBlob);
+    setStatus(null);
+  };
+
+  const downloadCompressed = () => {
+    if (!compressedBlob) return;
+    triggerDownload(compressedBlob, `${base}_compressed.pdf`);
+  };
+
+  const compressionLevels = [
+    { id: 'low', label: 'Light', bars: 1 },
+    { id: 'medium', label: 'Balanced', bars: 2 },
+    { id: 'high', label: 'Strong', bars: 3 },
+  ] as const;
 
   return (
-    <div className="pdf-proc-section">
-      <div className="pdf-proc-desc">
-        Reduce PDF file size by compressing images and fonts. Higher compression = smaller file but lower image quality.
-      </div>
-      <div className="pdf-proc-orig-size">
-        Original: <strong>{formatFileSize(doc.sizeBytes)}</strong>
+    <div className="pdf-compress-view">
+      {!isPdf && <div className="pdf-proc-warn">⚠ Only PDF files can be compressed</div>}
+
+      <div className="pdf-compress-summary">
+        <div className="pdf-compress-main-size">{formatFileSize(compressedSize ?? originalSize)}</div>
+        {savedPercent == null ? (
+          <div className="pdf-compress-sub-size">Original file size</div>
+        ) : (
+          <div className="pdf-compress-sub-size">
+            was {formatFileSize(originalSize)} <span className={savedPercent > 0 ? 'saved' : 'larger'}>{savedPercent > 0 ? `−${savedPercent}%` : savedPercent < 0 ? `+${Math.abs(savedPercent)}%` : 'No change'}</span>
+          </div>
+        )}
       </div>
 
-      <div className="pdf-proc-options">
-        {(['low', 'medium', 'high'] as const).map((l) => (
+      <div className="pdf-compress-levels" role="group" aria-label="Compression strength">
+        {compressionLevels.map(({ id, label, bars }) => (
           <button
-            key={l}
-            className={`pdf-proc-option-btn ${level === l ? 'active' : ''}`}
-            onClick={() => setLevel(l)}
+            key={id}
+            type="button"
+            className={`pdf-compress-level ${level === id ? 'active' : ''}`}
+            aria-pressed={level === id}
+            onClick={() => { setLevel(id); setCompressedBlob(null); }}
           >
-            <div className="pdf-proc-option-icon">{l === 'low' ? '🟢' : l === 'medium' ? '🟡' : '🔴'}</div>
-            <div className="pdf-proc-option-label">{l.charAt(0).toUpperCase() + l.slice(1)}</div>
-            <div className="pdf-proc-option-desc">
-              {l === 'low' ? '~80% quality' : l === 'medium' ? '~60% quality' : '~35% quality'}
-            </div>
+            <span className="pdf-compress-level-bars" aria-hidden="true">
+              {[1, 2, 3].map((bar) => <i key={bar} className={bar <= bars ? 'lit' : ''} />)}
+            </span>
+            <span>{label}</span>
           </button>
         ))}
       </div>
 
-      {!isPdf && <div className="pdf-proc-warn">⚠ Only PDF files can be compressed</div>}
+      <div className="pdf-compress-comparison">
+        <div className="pdf-compress-meter before">
+          <span className="pdf-compress-meter-fill" />
+          <span className="pdf-compress-meter-label">Before</span>
+          <strong>{formatFileSize(originalSize)}</strong>
+        </div>
+        <div className={`pdf-compress-meter after ${compressedBlob ? 'has-result' : ''}`}>
+          {compressedBlob && <span className="pdf-compress-meter-fill" style={{ width: `${Math.max(3, Math.min(100, (compressedSize! / (originalSize || 1)) * 100))}%` }} />}
+          <span className="pdf-compress-meter-label">After</span>
+          <strong>{compressedBlob ? formatFileSize(compressedSize!) : '—'}</strong>
+        </div>
+        <div className="pdf-compress-tip">
+          {compressedBlob && level !== 'high' ? (
+            <button type="button" onClick={() => { setLevel('high'); setCompressedBlob(null); }}>Try Strong for a smaller file</button>
+          ) : compressedBlob ? 'Compression complete' : 'Choose a level, then compress your PDF'}
+        </div>
+      </div>
 
-      <button
-        className="pdf-proc-cta-btn"
-        disabled={busy || !isPdf}
-        onClick={() => run(() => processAndPreview((url) => compressPdf(url, level), `${base}_compressed`))}
-      >
-        <span>{busy ? <BusySpinner text="Compressing…" /> : '📦 Compress & Preview →'}</span>
+      <button className="pdf-protect-submit pdf-compress-action" disabled={busy || !isPdf} onClick={() => compressedBlob ? downloadCompressed() : run(compress)}>
+        {busy ? <BusySpinner text="Compressing…" /> : <><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 3v12m0 0 5-5m-5 5-5-5"/><path d="M5 17v3a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-3"/></svg><span>{compressedBlob ? 'Download PDF' : 'Compress PDF'}</span></>}
       </button>
     </div>
   );
@@ -528,24 +573,24 @@ function ConvertTab({
       {/* Document Flow Graphic */}
       <div className="pdf-convert-diagram">
         {/* Source Doc */}
-        <svg width="42" height="52" viewBox="0 0 42 52" fill="none">
-          <path d="M26 2H8a5 5 0 0 0-5 5v38a5 5 0 0 0 5 5h26a5 5 0 0 0 5-5V17L26 2z" stroke="#EAF2FF" strokeWidth="2" strokeLinejoin="round" />
-          <path d="M25 2v15h14" stroke="#EAF2FF" strokeWidth="2" strokeLinejoin="round" />
-          <rect x="6" y="27" width="30" height="15" rx="3.5" fill="#081326" stroke="#EAF2FF" strokeWidth="1.5" />
-          <text x="21" y="38.5" fill="#EAF2FF" fontSize="9.5" fontWeight="700" textAnchor="middle" fontFamily="var(--font-mono)">{sourceBadge}</text>
+        <svg width="38" height="48" viewBox="0 0 42 52" fill="none">
+          <path d="M26 2H8a5 5 0 0 0-5 5v38a5 5 0 0 0 5 5h26a5 5 0 0 0 5-5V17L26 2z" stroke="#FFFFFF" strokeWidth="1.6" strokeLinejoin="round" />
+          <path d="M25 2v15h14" stroke="#FFFFFF" strokeWidth="1.6" strokeLinejoin="round" />
+          <rect x="6" y="27" width="30" height="15" rx="3" fill="#060C18" stroke="#FFFFFF" strokeWidth="1.2" />
+          <text x="21" y="38" fill="#FFFFFF" fontSize="9.5" fontWeight="700" textAnchor="middle" fontFamily="var(--font-mono, monospace)">{sourceBadge}</text>
         </svg>
 
         {/* Glowing Cyan Arrow */}
-        <svg width="32" height="24" viewBox="0 0 32 24" fill="none">
-          <path d="M4 12h22M18 4l8 8-8 8" stroke="#00CFFF" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" style={{ filter: 'drop-shadow(0 0 8px #00CFFF)' }} />
+        <svg width="28" height="20" viewBox="0 0 32 24" fill="none">
+          <path d="M4 12h22M18 4l8 8-8 8" stroke="#00CFFF" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={{ filter: 'drop-shadow(0 0 8px #00CFFF)' }} />
         </svg>
 
         {/* Target Doc */}
-        <svg width="42" height="52" viewBox="0 0 42 52" fill="none">
-          <path d="M26 2H8a5 5 0 0 0-5 5v38a5 5 0 0 0 5 5h26a5 5 0 0 0 5-5V17L26 2z" stroke="#EAF2FF" strokeWidth="2" strokeLinejoin="round" />
-          <path d="M25 2v15h14" stroke="#EAF2FF" strokeWidth="2" strokeLinejoin="round" />
-          <rect x="6" y="26" width="30" height="17" rx="3.5" fill="#087ED1" stroke="#00CFFF" strokeWidth="1.2" style={{ filter: 'drop-shadow(0 0 6px rgba(0,207,255,0.6))' }} />
-          <text x="21" y="38" fill="#EAF2FF" fontSize="9" fontWeight="800" textAnchor="middle" fontFamily="var(--font-mono)">{targetBadge}</text>
+        <svg width="38" height="48" viewBox="0 0 42 52" fill="none">
+          <path d="M26 2H8a5 5 0 0 0-5 5v38a5 5 0 0 0 5 5h26a5 5 0 0 0 5-5V17L26 2z" stroke="#FFFFFF" strokeWidth="1.6" strokeLinejoin="round" />
+          <path d="M25 2v15h14" stroke="#FFFFFF" strokeWidth="1.6" strokeLinejoin="round" />
+          <rect x="6" y="26" width="30" height="17" rx="3" fill="#0077E6" stroke="#00D2FF" strokeWidth="1.2" style={{ filter: 'drop-shadow(0 0 8px rgba(0,210,255,0.75))' }} />
+          <text x="21" y="38" fill="#FFFFFF" fontSize="9" fontWeight="800" textAnchor="middle" fontFamily="var(--font-mono, monospace)">{targetBadge}</text>
         </svg>
       </div>
 
@@ -553,7 +598,7 @@ function ConvertTab({
       <div>
         <div className="pdf-convert-hero-title">{title}</div>
         <div className="pdf-convert-hero-subtitle">
-          from {sourceBadge} <span className="pdf-convert-ext-badge">{ext}</span>
+          <span>from {sourceBadge}</span> <span className="pdf-convert-ext-badge">{ext}</span>
         </div>
       </div>
 
@@ -565,8 +610,7 @@ function ConvertTab({
             className={`pdf-convert-switch-btn ${format === 'word' ? 'active' : ''}`}
             onClick={() => setFormat('word')}
           >
-            {format === 'word' && <span className="pdf-glass-orb" />}
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
               <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
               <polyline points="14 2 14 8 20 8" />
             </svg>
@@ -578,8 +622,7 @@ function ConvertTab({
             className={`pdf-convert-switch-btn ${format === 'images' ? 'active' : ''}`}
             onClick={() => setFormat('images')}
           >
-            {format === 'images' && <span className="pdf-glass-orb" />}
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
               <rect x="3" y="3" width="18" height="18" rx="3" />
               <circle cx="8.5" cy="8.5" r="1.5" />
               <polyline points="21 15 16 10 5 21" />
@@ -592,12 +635,11 @@ function ConvertTab({
             className={`pdf-convert-switch-btn ${format === 'text' ? 'active' : ''}`}
             onClick={() => setFormat('text')}
           >
-            {format === 'text' && <span className="pdf-glass-orb" />}
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-              <rect x="3" y="3" width="18" height="18" rx="3" />
-              <line x1="7" y1="8" x2="17" y2="8" />
-              <line x1="7" y1="12" x2="17" y2="12" />
-              <line x1="7" y1="16" x2="13" y2="16" />
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="4" y="3" width="16" height="18" rx="3" />
+              <line x1="8" y1="8" x2="16" y2="8" />
+              <line x1="8" y1="12" x2="16" y2="12" />
+              <line x1="8" y1="16" x2="13" y2="16" />
             </svg>
             <span>Text</span>
           </button>
@@ -651,150 +693,267 @@ function ConvertTab({
 }
 
 // ---- Edit ----
-function EditTab({ doc, base, busy, run, processAndPreview, setStatus, storeResult }: OperationTabProps) {
-  const [splitPages, setSplitPages] = useState('');
-  const [deletePages, setDeletePages] = useState('');
-  const [rotateAngle, setRotateAngle] = useState<90 | 180 | 270>(90);
-  const [mergeList, setMergeList] = useState<string[]>([]);
-  const [allDocs, setAllDocs] = useState<StoredDocument[]>([]);
-  const [showMerge, setShowMerge] = useState(false);
-  const isPdf = doc.mimeType === 'application/pdf';
+type EditSubTab = 'numbers' | 'rotate' | 'split' | 'delete' | 'merge';
 
-  const loadAllForMerge = async () => {
-    const docs = await loadAllDocumentMetadata();
-    setAllDocs(docs.filter((d) => d.mimeType === 'application/pdf' && d.id !== doc.id));
-    setShowMerge(true);
-  };
+const EDIT_SUBTABS: { id: EditSubTab; label: string; icon: ReactElement }[] = [
+  {
+    id: 'numbers', label: 'Numbers',
+    icon: (
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+        <line x1="4" y1="9" x2="20" y2="9" /><line x1="4" y1="15" x2="20" y2="15" />
+        <line x1="10" y1="3" x2="8" y2="21" /><line x1="16" y1="3" x2="14" y2="21" />
+      </svg>
+    ),
+  },
+  {
+    id: 'rotate', label: 'Rotate',
+    icon: (
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M3 12a9 9 0 1 0 3-6.7" /><polyline points="3 4 3 9 8 9" />
+      </svg>
+    ),
+  },
+  {
+    id: 'split', label: 'Split',
+    icon: (
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+        <circle cx="6" cy="6" r="3" /><circle cx="6" cy="18" r="3" />
+        <line x1="20" y1="4" x2="8.12" y2="15.88" /><line x1="14.47" y1="14.48" x2="20" y2="20" />
+        <line x1="8.12" y1="8.12" x2="12" y2="12" />
+      </svg>
+    ),
+  },
+  {
+    id: 'delete', label: 'Delete',
+    icon: (
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+        <polyline points="3 6 5 6 21 6" />
+        <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+        <path d="M10 11v6M14 11v6" /><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+      </svg>
+    ),
+  },
+  {
+    id: 'merge', label: 'Merge',
+    icon: (
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+      </svg>
+    ),
+  },
+];
+
+const TrashIcon = ({ size = 14 }: { size?: number }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <polyline points="3 6 5 6 21 6" />
+    <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+    <path d="M10 11v6M14 11v6" /><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+  </svg>
+);
+
+function DeletePagesView({ doc, busy, run, processAndPreview, base }: Pick<OperationTabProps, 'doc' | 'busy' | 'run' | 'processAndPreview' | 'base'>) {
+  const [pageCount, setPageCount] = useState(0);
+  const [thumbs, setThumbs] = useState<Record<number, string>>({});
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [previewPage, setPreviewPage] = useState<number | null>(null);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const pdfRef = useRef<PdfHandle | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setLoadError(null);
+    (async () => {
+      try {
+        const blob = await loadDocumentBlob(doc.id);
+        const pdf = await openPdf(blob);
+        if (cancelled) { void closePdf(pdf); return; }
+        pdfRef.current = pdf;
+        setPageCount(pdf.numPages);
+        setLoading(false);
+        for (let p = 1; p <= pdf.numPages; p++) {
+          if (cancelled) return;
+          const url = await renderPageToDataUrl(pdf, p, 120);
+          if (cancelled) return;
+          setThumbs((prev) => ({ ...prev, [p]: url }));
+        }
+      } catch {
+        if (!cancelled) { setLoadError('Could not read pages from this PDF'); setLoading(false); }
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (pdfRef.current) void closePdf(pdfRef.current);
+      pdfRef.current = null;
+    };
+  }, [doc.id]);
+
+  useEffect(() => {
+    if (previewPage == null || !pdfRef.current) { setPreviewUrl(null); return; }
+    let cancelled = false;
+    setPreviewUrl(null);
+    renderPageToDataUrl(pdfRef.current, previewPage, 260)
+      .then((u) => { if (!cancelled) setPreviewUrl(u); })
+      .catch(() => { if (!cancelled) setLoadError('Could not render this page'); });
+    return () => { cancelled = true; };
+  }, [previewPage]);
+
+  const toggle = (p: number) => setSelected((prev) => {
+    const next = new Set(prev);
+    if (next.has(p)) next.delete(p); else next.add(p);
+    return next;
+  });
+
+  const count = selected.size;
+  const allSelected = pageCount > 0 && count >= pageCount;
+  const canDelete = count > 0 && !allSelected && !busy;
+
+  const actionBtn = (
+    <>
+      {allSelected && (
+        <div className="pdf-edit-note" role="alert">Keep at least 1 page — tap a page to unselect it</div>
+      )}
+      <button
+        type="button"
+        className="pdf-edit-delete-btn"
+        aria-disabled={!canDelete}
+        onClick={() => {
+          if (!canDelete) return;
+          void run(() => processAndPreview((url) => deletePdfPages(url, pagesToRangeString([...selected])), `${base}_edited`));
+        }}
+      >
+        {busy ? <BusySpinner text="Deleting…" /> : (
+          <>
+            <TrashIcon size={22} />
+            <span>{count === 0 ? 'Select pages to delete' : `Delete ${count} ${count === 1 ? 'Page' : 'Pages'}`}</span>
+          </>
+        )}
+      </button>
+    </>
+  );
+
+  if (loadError) return <div className="pdf-proc-warn">⚠ {loadError}</div>;
+  if (loading) return <div className="pdf-edit-hint">Loading pages…</div>;
+
+  if (previewPage != null) {
+    const isMarked = selected.has(previewPage);
+    return (
+      <div className="pdf-edit-view">
+        <div className="pdf-edit-head">
+          <span className="pdf-edit-count">Page {previewPage} of {pageCount}</span>
+          <button type="button" className="pdf-edit-link" onClick={() => setPreviewPage(null)}>Back to grid</button>
+        </div>
+        <div className="pdf-edit-preview-row">
+          <button type="button" className="pdf-edit-nav" aria-label="Previous page" disabled={previewPage <= 1} onClick={() => setPreviewPage(previewPage - 1)}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6" /></svg>
+          </button>
+          <div className={`pdf-edit-preview-frame ${isMarked ? 'marked' : ''}`}>
+            {previewUrl ? <img src={previewUrl} alt={`Page ${previewPage}`} /> : <div className="pdf-edit-hint">Rendering…</div>}
+          </div>
+          <button type="button" className="pdf-edit-nav" aria-label="Next page" disabled={previewPage >= pageCount} onClick={() => setPreviewPage(previewPage + 1)}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 18 15 12 9 6" /></svg>
+          </button>
+        </div>
+        <div className="pdf-edit-chip-slot">
+          {isMarked && <span className="pdf-edit-chip"><TrashIcon size={13} /> Marked for delete</span>}
+        </div>
+        {actionBtn}
+      </div>
+    );
+  }
+
+  return (
+    <div className="pdf-edit-view">
+      <div className="pdf-edit-head">
+        <span className="pdf-edit-count">{count} of {pageCount} selected</span>
+        <button type="button" className="pdf-edit-link" onClick={() => setSelected(new Set())} disabled={count === 0}>Clear</button>
+      </div>
+      <div className="pdf-edit-grid">
+        {Array.from({ length: pageCount }, (_, i) => i + 1).map((p) => {
+          const isSel = selected.has(p);
+          return (
+            <div key={p} className="pdf-edit-cell">
+              <div
+                className={`pdf-edit-card ${isSel ? 'selected' : ''}`}
+                role="button"
+                tabIndex={0}
+                aria-pressed={isSel}
+                aria-label={`Page ${p}`}
+                onClick={() => toggle(p)}
+                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(p); } }}
+              >
+                <div className="pdf-edit-thumb">
+                  {thumbs[p] ? <img src={thumbs[p]} alt="" draggable={false} /> : <div className="pdf-edit-thumb-ph" />}
+                </div>
+                {isSel && <span className="pdf-edit-badge"><TrashIcon size={13} /></span>}
+                <button
+                  type="button"
+                  className="pdf-edit-magnify"
+                  aria-label={`Preview page ${p}`}
+                  onClick={(e) => { e.stopPropagation(); setPreviewPage(p); }}
+                >
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="10.5" cy="10.5" r="7" /><line x1="21" y1="21" x2="15.5" y2="15.5" />
+                  </svg>
+                </button>
+              </div>
+              <span className="pdf-edit-pnum">{p}</span>
+            </div>
+          );
+        })}
+      </div>
+      <div className="pdf-edit-hint">Tap to select · magnifier to preview</div>
+      {actionBtn}
+    </div>
+  );
+}
+
+function EditTab({ doc, base, busy, run, processAndPreview, setStatus, storeResult }: OperationTabProps) {
+  const [sub, setSub] = useState<EditSubTab>('delete');
+  const isPdf = doc.mimeType === 'application/pdf';
+  const viewProps = { doc, base, busy, run, processAndPreview, setStatus, storeResult };
 
   return (
     <div className="pdf-proc-section">
       {!isPdf && <div className="pdf-proc-warn">⚠ Only PDF files can be edited</div>}
 
-      {/* Page Numbers */}
-      <div className="pdf-proc-subsection">
-        <div className="pdf-proc-sub-title">Add Page Numbers</div>
-        <button
-          className="btn btn-secondary btn-full"
-          disabled={busy || !isPdf}
-          onClick={() => run(() => processAndPreview((url) => addPageNumbers(url), `${base}_numbered`))}
-        >
-          {busy ? <BusySpinner text="Adding…" /> : '🔢 Add Page Numbers & Preview'}
-        </button>
-      </div>
-
-      {/* Rotate */}
-      <div className="pdf-proc-subsection">
-        <div className="pdf-proc-sub-title">Rotate Pages</div>
-        <div className="pdf-proc-row">
-          {([90, 180, 270] as const).map((a) => (
-            <button
-              key={a}
-              className={`pdf-proc-option-btn compact ${rotateAngle === a ? 'active' : ''}`}
-              onClick={() => setRotateAngle(a)}
-            >
-              {a}°
-            </button>
-          ))}
-        </div>
-        <button
-          className="btn btn-secondary btn-full"
-          disabled={busy || !isPdf}
-          onClick={() => run(() => processAndPreview((url) => rotatePdf(url, rotateAngle), `${base}_rotated`))}
-        >
-          {busy ? <BusySpinner text="Rotating…" /> : `↩ Rotate ${rotateAngle}° & Preview`}
-        </button>
-      </div>
-
-      {/* Split */}
-      <div className="pdf-proc-subsection">
-        <div className="pdf-proc-sub-title">Split Pages</div>
-        <div className="pdf-proc-hint">Page range e.g. <code>1,2,3-5</code> — each range = separate PDF</div>
-        <input
-          className="form-input"
-          placeholder="e.g. 1-3, 4-6"
-          value={splitPages}
-          onChange={(e) => setSplitPages(e.target.value)}
-        />
-        <button
-          className="btn btn-secondary btn-full"
-          style={{ marginTop: 6 }}
-          disabled={busy || !isPdf || !splitPages.trim()}
-          onClick={() => run(() => processAndPreview((url) => splitPdf(url, splitPages), `${base}_split`))}
-        >
-          {busy ? <BusySpinner text="Splitting…" /> : '✂️ Split & Preview'}
-        </button>
-      </div>
-
-      {/* Delete Pages */}
-      <div className="pdf-proc-subsection">
-        <div className="pdf-proc-sub-title">Delete Pages</div>
-        <div className="pdf-proc-hint">Pages to <strong>remove</strong> e.g. <code>1,3-5</code></div>
-        <input
-          className="form-input"
-          placeholder="e.g. 1, 3-5"
-          value={deletePages}
-          onChange={(e) => setDeletePages(e.target.value)}
-        />
-        <button
-          className="btn btn-secondary btn-full"
-          style={{ marginTop: 6 }}
-          disabled={busy || !isPdf || !deletePages.trim()}
-          onClick={() => run(() => processAndPreview((url) => deletePdfPages(url, deletePages), `${base}_edited`))}
-        >
-          {busy ? <BusySpinner text="Deleting…" /> : '🗑 Delete Pages & Preview'}
-        </button>
-      </div>
-
-      {/* Merge */}
-      <div className="pdf-proc-subsection">
-        <div className="pdf-proc-sub-title">Merge PDFs</div>
-        {!showMerge ? (
-          <button className="btn btn-secondary btn-full" onClick={loadAllForMerge} disabled={busy || !isPdf}>
-            📎 Select PDFs to Merge
+      <div className="pdf-edit-subtabs" role="tablist">
+        {EDIT_SUBTABS.map((t) => (
+          <button
+            key={t.id}
+            type="button"
+            role="tab"
+            aria-selected={sub === t.id}
+            className={`pdf-edit-subtab ${sub === t.id ? 'active' : ''}`}
+            onClick={() => { setSub(t.id); setStatus?.(null); }}
+          >
+            {t.icon}
+            <span>{t.label}</span>
           </button>
-        ) : (
-          <div>
-            <div className="pdf-proc-hint">Select additional PDFs to merge after <strong>{doc.name}</strong>:</div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 4, margin: '6px 0' }}>
-              {allDocs.length === 0 && <div className="pdf-proc-hint">No other PDFs in vault</div>}
-              {allDocs.map((d) => (
-                <label key={d.id} style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: '0.8rem', color: 'var(--color-pc-text)' }}>
-                  <input
-                    type="checkbox"
-                    checked={mergeList.includes(d.id)}
-                    onChange={(e) => setMergeList((prev) => e.target.checked ? [...prev, d.id] : prev.filter((x) => x !== d.id))}
-                    style={{ accentColor: 'var(--color-pc-accent-start)' }}
-                  />
-                  {d.name} <span style={{ color: 'var(--color-pc-text-muted)', fontSize: '0.7rem' }}>({formatFileSize(d.sizeBytes)})</span>
-                </label>
-              ))}
-            </div>
-            <button
-              className="btn btn-primary btn-full"
-              disabled={busy || mergeList.length === 0}
-              onClick={() => run(async () => {
-                if (!setStatus) return;
-                setStatus({ type: 'info', msg: 'Uploading files…' });
-                const blob0 = await loadDocumentBlob(doc.id);
-                const url0 = await uploadToPdfCo(blob0, doc.originalName);
-                const extraUrls: string[] = [];
-                for (const id of mergeList) {
-                  const b = await loadDocumentBlob(id);
-                  const d2 = allDocs.find((x) => x.id === id)!;
-                  extraUrls.push(await uploadToPdfCo(b, d2.originalName));
-                }
-                setStatus({ type: 'info', msg: 'Merging…' });
-                const resultUrl = await mergePdfs([url0, ...extraUrls]);
-                const outBlob = await downloadResult(resultUrl);
-                storeResult?.([outBlob], [`${base}_merged.pdf`], 'application/pdf');
-                setStatus({ type: 'success', msg: `✓ Merged ${1 + mergeList.length} PDFs (${formatFileSize(outBlob.size)})` });
-              })}
-            >
-              {busy ? <BusySpinner text="Merging…" /> : `📎 Merge ${1 + mergeList.length} PDFs & Preview`}
-            </button>
-          </div>
-        )}
+        ))}
       </div>
+
+      {sub === 'numbers' && (
+        <div className="pdf-proc-subsection">
+          <div className="pdf-proc-sub-title">Add Page Numbers</div>
+          <button
+            className="pdf-edit-action-btn"
+            disabled={busy || !isPdf}
+            onClick={() => run(() => processAndPreview((url) => addPageNumbers(url), `${base}_numbered`))}
+          >
+            {busy ? <BusySpinner text="Adding…" /> : 'Add Page Numbers & Preview'}
+          </button>
+        </div>
+      )}
+
+      {sub === 'rotate' && isPdf && <RotateView {...viewProps} />}
+      {sub === 'split' && isPdf && <SplitView {...viewProps} />}
+      {sub === 'delete' && isPdf && (
+        <DeletePagesView doc={doc} base={base} busy={busy} run={run} processAndPreview={processAndPreview} />
+      )}
+      {sub === 'merge' && isPdf && <MergeView {...viewProps} />}
     </div>
   );
 }
@@ -804,63 +963,78 @@ function ProtectTab({ doc, base, busy, run, processAndPreview }: OperationTabPro
   const [pwd, setPwd] = useState('');
   const [unlockPwd, setUnlockPwd] = useState('');
   const [show, setShow] = useState(false);
+  const [mode, setMode] = useState<'lock' | 'unlock'>('lock');
   const isPdf = doc.mimeType === 'application/pdf';
+  const password = mode === 'lock' ? pwd : unlockPwd;
+  const setPassword = mode === 'lock' ? setPwd : setUnlockPwd;
+  const strength = getPasswordStrength(pwd);
 
   return (
-    <div className="pdf-proc-section">
+    <div className="pdf-protect-view">
       {!isPdf && <div className="pdf-proc-warn">⚠ Only PDF files can be protected</div>}
 
-      <div className="pdf-proc-subsection">
-        <div className="pdf-proc-sub-title">🔒 Add Password Protection</div>
-        <div className="pdf-proc-hint">Encrypts the PDF — recipients need this password to open it.</div>
-        <div className="vault-password-wrapper" style={{ marginTop: 6 }}>
-          <input
-            className="form-input"
-            type={show ? 'text' : 'password'}
-            placeholder="Set a password"
-            value={pwd}
-            onChange={(e) => setPwd(e.target.value)}
-          />
-          <button type="button" className="vault-toggle-visibility" onClick={() => setShow(!show)} tabIndex={-1}>
-            {show ? '🙈' : '👁️'}
-          </button>
-        </div>
-        <button
-          className="btn btn-primary btn-full"
-          style={{ marginTop: 8 }}
-          disabled={busy || !isPdf || !pwd}
-          onClick={() => run(() => processAndPreview((url) => protectPdf(url, pwd), `${base}_protected`))}
-        >
-          {busy ? <BusySpinner text="Protecting…" /> : '🔒 Protect & Preview'}
+      <div className="pdf-protect-switch" role="group" aria-label="Protection action">
+        <button type="button" className={`pdf-protect-switch-option ${mode === 'lock' ? 'active' : ''}`} onClick={() => { setMode('lock'); setShow(false); }} aria-pressed={mode === 'lock'}>
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v3"/></svg>
+          <span>Lock</span>
+        </button>
+        <button type="button" className={`pdf-protect-switch-option ${mode === 'unlock' ? 'active' : ''}`} onClick={() => { setMode('unlock'); setShow(false); }} aria-pressed={mode === 'unlock'}>
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 7.7-1.5M12 14v3"/></svg>
+          <span>Unlock</span>
         </button>
       </div>
 
-      <div className="pdf-proc-subsection">
-        <div className="pdf-proc-sub-title">🔓 Remove Password</div>
-        <div className="pdf-proc-hint">Provide the current password to unlock the PDF.</div>
-        <div className="vault-password-wrapper" style={{ marginTop: 6 }}>
-          <input
-            className="form-input"
-            type={show ? 'text' : 'password'}
-            placeholder="Current password"
-            value={unlockPwd}
-            onChange={(e) => setUnlockPwd(e.target.value)}
-          />
-          <button type="button" className="vault-toggle-visibility" onClick={() => setShow(!show)} tabIndex={-1}>
-            {show ? '🙈' : '👁️'}
-          </button>
-        </div>
-        <button
-          className="btn btn-secondary btn-full"
-          style={{ marginTop: 8 }}
-          disabled={busy || !isPdf || !unlockPwd}
-          onClick={() => run(() => processAndPreview((url) => unlockPdf(url, unlockPwd), `${base}_unlocked`))}
-        >
-          {busy ? <BusySpinner text="Unlocking…" /> : '🔓 Unlock & Preview'}
+      <div className="pdf-protect-password">
+        <svg className="pdf-protect-input-lock" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v3"/></svg>
+        <input
+          id="pdf-protect-password"
+          type={show ? 'text' : 'password'}
+          placeholder={mode === 'lock' ? 'Set a password' : 'Current password'}
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          autoComplete={mode === 'lock' ? 'new-password' : 'current-password'}
+          aria-label={mode === 'lock' ? 'Set a password' : 'Current password'}
+        />
+        <button type="button" className="pdf-protect-eye" onClick={() => setShow(!show)} aria-label={show ? 'Hide password' : 'Show password'}>
+          {show ? <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><path d="M3 3l18 18M10.6 10.6a2 2 0 0 0 2.8 2.8"/><path d="M9.9 5.2A10.8 10.8 0 0 1 12 5c5 0 8.5 5 9 7-.2.8-1 2-2.3 3.2M6.2 6.2C3.8 7.7 2.2 10.2 2 12c.5 2 4 7 10 7 1.1 0 2.1-.2 3-.5"/></svg> : <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>}
         </button>
       </div>
+
+      {mode === 'lock' ? (
+        <div className="pdf-protect-strength" aria-live="polite">
+          <div className="pdf-protect-strength-bars" aria-label={`Password strength: ${strength.label}`}>
+            {[0, 1, 2, 3].map((bar) => <span key={bar} className={bar < strength.level ? `filled strength-${strength.level}` : ''} />)}
+          </div>
+          <span className={`pdf-protect-strength-label strength-text-${strength.level}`}>{strength.label}</span>
+          <p>Recipients need this password to open it.</p>
+        </div>
+      ) : (
+        <p className="pdf-protect-unlock-hint">Enter the current password to remove protection.</p>
+      )}
+
+      <button
+        className="pdf-protect-submit"
+        disabled={busy || !isPdf || !password}
+        onClick={() => mode === 'lock'
+          ? run(() => processAndPreview((url) => protectPdf(url, pwd), `${base}_protected`))
+          : run(() => processAndPreview((url) => unlockPdf(url, unlockPwd), `${base}_unlocked`))}
+      >
+        <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v3"/></svg>
+        <span>{busy ? <BusySpinner text={mode === 'lock' ? 'Protecting…' : 'Unlocking…'} /> : mode === 'lock' ? 'Protect & Preview' : 'Unlock & Preview'}</span>
+      </button>
     </div>
   );
+}
+
+function getPasswordStrength(password: string): { level: number; label: string } {
+  if (!password) return { level: 0, label: 'Enter a password' };
+  let score = 0;
+  if (password.length >= 8) score++;
+  if (password.length >= 12) score++;
+  if (/[a-z]/.test(password) && /[A-Z]/.test(password)) score++;
+  if (/\d/.test(password) || /[^A-Za-z0-9]/.test(password)) score++;
+  const level = score <= 1 ? 1 : score === 2 ? 2 : score === 3 ? 3 : 4;
+  return { level, label: ['','Weak','Fair','Good','Strong'][level] };
 }
 
 // ---- OCR ----
@@ -895,13 +1069,13 @@ function OcrTab({ doc, busy, setBusy, setStatus, loadDocumentBlob: loadBlob }: T
   };
 
   return (
-    <div className="pdf-proc-section">
+    <div className="pdf-ocr-view">
       {!isPdf && <div className="pdf-proc-warn">⚠ Only PDF files support OCR</div>}
-      <div className="pdf-proc-desc">Extract text from scanned or image-based PDFs using OCR.</div>
+      <div className="pdf-ocr-description">Extract text from scanned or image-based PDFs using OCR.</div>
 
-      <div className="form-group">
-        <label className="form-label">Language</label>
-        <select className="form-select" value={lang} onChange={(e) => setLang(e.target.value)}>
+      <div className="pdf-ocr-language">
+        <label htmlFor="pdf-ocr-language">Language</label>
+        <select id="pdf-ocr-language" value={lang} onChange={(e) => setLang(e.target.value)}>
           <option value="eng">English</option>
           <option value="hin">Hindi</option>
           <option value="kan">Kannada</option>
@@ -916,8 +1090,8 @@ function OcrTab({ doc, busy, setBusy, setStatus, loadDocumentBlob: loadBlob }: T
         </select>
       </div>
 
-      <button className="btn btn-primary btn-full" disabled={busy || !isPdf} onClick={runOcr}>
-        {busy ? <BusySpinner text="Running OCR…" /> : '🔍 Extract Text (OCR)'}
+      <button className="pdf-protect-submit pdf-ocr-action" disabled={busy || !isPdf} onClick={runOcr}>
+        {busy ? <BusySpinner text="Running OCR…" /> : <><svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v3"/></svg><span>Extract Text (OCR)</span></>}
       </button>
 
       {ocrText && (
@@ -1001,75 +1175,6 @@ function InfoTab({ doc, busy, setBusy, setStatus, loadDocumentBlob: loadBlob }: 
   );
 }
 
-// ---- Settings (API Keys) ----
-function SettingsTab({ setStatus }: { setStatus: (s: { type: 'success' | 'error' | 'info'; msg: string } | null) => void }) {
-  const [newKey, setNewKey] = useState('');
-  const [extraKeys, setExtraKeys] = useState<string[]>([]);
-  const [loaded, setLoaded] = useState(false);
-
-  const load = async () => {
-    const keys = await getExtraKeys();
-    setExtraKeys(keys);
-    setLoaded(true);
-  };
-
-  useState(() => { load(); });
-
-  const addKey = async () => {
-    if (!newKey.trim()) return;
-    await saveExtraKey(newKey.trim());
-    setNewKey('');
-    await load();
-    setStatus({ type: 'success', msg: '✓ API key saved' });
-  };
-
-  const removeKey = async (k: string) => {
-    await removeExtraKey(k);
-    await load();
-  };
-
-  return (
-    <div className="pdf-proc-section">
-      <div className="pdf-proc-desc">
-        Add extra PDF.co API keys for fallback when credits run out. Keys are stored locally (not in the encrypted vault).
-      </div>
-
-      <div className="pdf-proc-subsection">
-        <div className="pdf-proc-sub-title">Add API Key</div>
-        <input
-          className="form-input"
-          type="text"
-          placeholder="email@example.com_XXXXXXXX"
-          value={newKey}
-          onChange={(e) => setNewKey(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter') addKey(); }}
-        />
-        <button className="btn btn-primary btn-full" style={{ marginTop: 6 }} onClick={addKey} disabled={!newKey.trim()}>
-          + Add Key
-        </button>
-      </div>
-
-      {loaded && extraKeys.length > 0 && (
-        <div className="pdf-proc-subsection">
-          <div className="pdf-proc-sub-title">Saved Fallback Keys ({extraKeys.length})</div>
-          {extraKeys.map((k, i) => (
-            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
-              <span style={{ flex: 1, fontSize: '0.72rem', color: 'var(--color-pc-text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {k.slice(0, 32)}…
-              </span>
-              <button className="btn btn-danger btn-sm" onClick={() => removeKey(k)}>🗑</button>
-            </div>
-          ))}
-        </div>
-      )}
-
-      <div className="pdf-proc-hint" style={{ marginTop: 8 }}>
-        💡 Get free keys at <strong>pdf.co</strong> — each account gets 10,000 credits/month
-      </div>
-    </div>
-  );
-}
-
 // ---- Helpers ----
 
 function ActionCard({ icon, title, desc, busy, onClick }: { icon: string; title: string; desc: string; busy: boolean; onClick: () => void }) {
@@ -1079,14 +1184,5 @@ function ActionCard({ icon, title, desc, busy, onClick }: { icon: string; title:
       <strong style={{ fontSize: '0.8rem' }}>{title}</strong>
       <span style={{ fontSize: '0.68rem', color: 'var(--color-pc-text-muted)' }}>{desc}</span>
     </button>
-  );
-}
-
-function BusySpinner({ text }: { text: string }) {
-  return (
-    <span style={{ display: 'flex', alignItems: 'center', gap: 6, justifyContent: 'center' }}>
-      <span className="spinner" />
-      {text}
-    </span>
   );
 }

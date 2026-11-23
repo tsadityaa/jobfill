@@ -7,7 +7,7 @@ import { uploadToPdfCo, compressPdf, pdfToImages, downloadResult } from '../util
 import { renderMarkdown } from '../utils/markdownRenderer';
 import { getCurrentUser } from '../utils/supabase';
 import { searchMemory } from '../utils/memory';
-import { requestOpenRouter } from '../utils/backendClient';
+import { AI_MODEL, requestAgentRouter } from '../utils/backendClient';
 
 interface AgentChatProps {
   profile: UserProfile;
@@ -87,6 +87,34 @@ ${memorySection}
 - If something is not in your capabilities, say so clearly.`;
 }
 
+async function copyTextToClipboard(text: string): Promise<boolean> {
+  try {
+    const writeText = navigator.clipboard?.writeText;
+    if (writeText) {
+      await writeText.call(navigator.clipboard, text);
+      return true;
+    }
+  } catch {
+    // Clipboard API can be blocked by the popup's embedding permissions policy.
+  }
+
+  let textarea: HTMLTextAreaElement | undefined;
+  try {
+    textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.setAttribute('readonly', '');
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.select();
+    return document.execCommand('copy');
+  } catch {
+    return false;
+  } finally {
+    textarea?.remove();
+  }
+}
+
 // Extract text from a PDF blob using PDF.co API
 async function extractPdfText(blob: Blob, filename: string): Promise<string> {
   try {
@@ -128,6 +156,7 @@ export default function AgentChat({ profile }: AgentChatProps) {
   const [inlinePreviews, setInlinePreviews] = useState<{url: string, name: string}[]>([]);
   const [hoveredMsgIdx, setHoveredMsgIdx] = useState<number | null>(null);
   const [copiedMsgIdx, setCopiedMsgIdx] = useState<number | null>(null);
+  const [copyFailedMsgIdx, setCopyFailedMsgIdx] = useState<number | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -240,20 +269,23 @@ export default function AgentChat({ profile }: AgentChatProps) {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 30000);
 
-      const response = await requestOpenRouter({
-          model: 'openai/gpt-4o-mini',
+      const response = await requestAgentRouter({
+          model: AI_MODEL,
           messages: [
             { role: 'system', content: systemPrompt },
             ...updatedMessages,
           ],
           temperature: 0.7,
           max_tokens: 1024,
-        }, controller.signal);
+        }, controller.signal, 'agent-chat');
 
       clearTimeout(timeoutId);
 
       if (!response.ok) {
         const errText = await response.text();
+        if (response.status === 404) {
+          throw new Error('The backend does not have the Agent Router endpoint yet. Start the updated local backend or deploy the latest Worker.');
+        }
         throw new Error(`API error ${response.status}: ${errText.slice(0, 120)}`);
       }
 
@@ -370,12 +402,16 @@ export default function AgentChat({ profile }: AgentChatProps) {
                     <button
                       className="agent-copy-btn"
                       onClick={async () => {
-                        await navigator.clipboard.writeText(msg.content);
-                        setCopiedMsgIdx(i);
-                        setTimeout(() => setCopiedMsgIdx(null), 2000);
+                        const copied = await copyTextToClipboard(msg.content);
+                        setCopiedMsgIdx(copied ? i : null);
+                        setCopyFailedMsgIdx(copied ? null : i);
+                        setTimeout(() => {
+                          setCopiedMsgIdx(null);
+                          setCopyFailedMsgIdx(null);
+                        }, 2000);
                       }}
                     >
-                      {copiedMsgIdx === i ? '✓ Copied' : '📋 Copy'}
+                      {copiedMsgIdx === i ? '✓ Copied' : copyFailedMsgIdx === i ? 'Copy blocked' : '📋 Copy'}
                     </button>
                   )}
                   {msg.role === 'assistant' ? (

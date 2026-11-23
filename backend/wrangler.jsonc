@@ -4,6 +4,9 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-10-11",
   "workers_dev": true,
+  "vars": {
+    "AGENTROUTER_MODEL": "gpt-5.6-sol"
+  },
   "observability": {
     "enabled": true
   },
@@ -11,7 +14,9 @@
     "required": [
       "SUPABASE_URL",
       "SUPABASE_ANON_KEY",
-      "OPENROUTER_API_KEY"
+      "AGENTROUTER_API_KEY",
+      "SUPERMEMORY_API_KEY",
+      "PDFCO_API_KEY"
     ]
   }
 }
